@@ -2,7 +2,7 @@
  * ESP8266 WS2812 LED Controller with Captive Portal & OTA
  * --------------------------------------------------------
  * - Captive WiFi hotspot with web UI
- * - WS2812 LED chain control (5 LEDs)
+ * - WS2812 LED chain control (60 LEDs)
  * - OTA firmware update over WiFi
  * - Multiple LED effects & color control
  */
@@ -18,6 +18,11 @@
 #include <FastLED.h>
 #include <Updater.h>
 #include <EEPROM.h>
+
+// ─── Firmware Version & Build Info ───────────────────────
+#define FW_VERSION "1.0.0"
+#define FW_BUILD_DATE __DATE__
+#define FW_BUILD_TIME __TIME__
 
 // ─── Configuration ───────────────────────────────────────
 #ifndef NUM_LEDS
@@ -100,6 +105,33 @@ struct OtaStatusState {
   unsigned long finishedAt = 0;
 } otaStatus;
 
+struct OtaDebugTrace {
+  bool active = false;
+  bool pendingInit = false;
+  bool pendingFinal = false;
+  bool pendingError = false;
+
+  uint32_t cbCount = 0;
+  uint32_t chunkCount = 0;
+  uint32_t totalBytes = 0;
+  uint32_t expectedBytes = 0;
+
+  uint32_t lastIdx = 0;
+  uint32_t lastLen = 0;
+  uint32_t lastOffset = 0;
+  uint32_t lastReqChunk = 0;
+  uint32_t lastWrote = 0;
+  uint32_t lastDtUs = 0;
+  uint32_t maxDtUs = 0;
+  uint32_t lastHeap = 0;
+  uint32_t initHeap = 0;
+  uint32_t maxUpdateSize = 0;
+
+  uint8_t lastErr = 0;
+  bool finalOk = false;
+  uint32_t finalDtMs = 0;
+} otaDbg;
+
 struct WifiConnectState {
   bool active = false;
   bool resultReady = false;
@@ -154,6 +186,7 @@ void setupDNS();
 void setupMDNS();
 void setupOTA();
 void setupWebServer();
+void flushOtaDebugLogs();
 void setupLEDs();
 void updateLEDs();
 void effectSolid();
@@ -517,7 +550,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <!-- Info -->
   <div class="card">
     <div class="card-title">DEVICE INFO</div>
-    <div class="info-row"><span>LEDs</span><span>65</span></div>
+    <div class="info-row"><span>Firmware</span><span id="fwVersion">-</span></div>
+    <div class="info-row"><span>LEDs</span><span id="ledCount">-</span></div>
     <div class="info-row"><span>AP SSID</span><span id="apSsid">-</span></div>
     <div class="info-row"><span>Host</span><span id="host">-</span></div>
     <div class="info-row"><span>IP</span><span id="ip">-</span></div>
@@ -551,6 +585,68 @@ const API = '';
 let debounce = null;
 let fwPrecheckOk = false;
 let fwPrecheckSummary = '';
+const OTA_REBOOT_KEY = 'otaRebootPending';
+
+function saveOtaRebootState(meta = {}) {
+  try {
+    localStorage.setItem(OTA_REBOOT_KEY, JSON.stringify({
+      at: Date.now(),
+      ...meta
+    }));
+  } catch (_) {}
+}
+
+function readOtaRebootState() {
+  try {
+    const raw = localStorage.getItem(OTA_REBOOT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearOtaRebootState() {
+  try { localStorage.removeItem(OTA_REBOOT_KEY); } catch (_) {}
+}
+
+function waitForDeviceAfterUpdate() {
+  const statusMsg = document.getElementById('statusMsg');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const startedAt = Date.now();
+
+  statusMsg.textContent = 'Firmware uploaded. Reconnecting after reboot...';
+  statusMsg.className = 'status-msg';
+  uploadBtn.disabled = true;
+
+  const tryReconnect = () => {
+    fetch('/api/status?ts=' + Date.now(), { cache: 'no-store' })
+      .then(r => {
+        if (!r.ok) throw new Error('status not ready');
+        return r.json();
+      })
+      .then(d => {
+        const last = readOtaRebootState();
+        clearOtaRebootState();
+        const bytes = (d.ota_status && d.ota_status.written_bytes) ? d.ota_status.written_bytes : ((last && last.written) ? last.written : 0);
+        statusMsg.textContent = `Update successful (${bytes} bytes). Device reconnected at ${d.ip || 'online'}.`;
+        statusMsg.className = 'status-msg status-ok';
+        uploadBtn.disabled = false;
+        pollStatus();
+      })
+      .catch(() => {
+        if (Date.now() - startedAt > 90000) {
+          statusMsg.textContent = 'Device is still rebooting. Refresh in a few seconds.';
+          statusMsg.className = 'status-msg status-err';
+          uploadBtn.disabled = false;
+          return;
+        }
+        setTimeout(tryReconnect, 1500);
+      });
+  };
+
+  setTimeout(tryReconnect, 800);
+}
 
 function send(url) {
   fetch(API + url).catch(e => console.warn(e));
@@ -656,9 +752,15 @@ function uploadFirmware() {
     let payload = null;
     try { payload = JSON.parse(xhr.responseText); } catch (_) {}
     if (xhr.status === 200 && payload && payload.ok) {
-      statusMsg.textContent = `Update OK (${payload.written || 0} bytes). Rebooting...`;
+      const writtenBytes = (payload.written && payload.written > 0) ? payload.written : file.size;
+      saveOtaRebootState({
+        written: writtenBytes,
+        expected: payload.expected || 0,
+        file: file.name
+      });
+      statusMsg.textContent = `Update OK (${writtenBytes} bytes). Rebooting...`;
       statusMsg.className = 'status-msg status-ok';
-      setTimeout(() => location.reload(), 5000);
+      setTimeout(() => location.reload(), 1200);
       return;
     }
 
@@ -668,9 +770,9 @@ function uploadFirmware() {
     document.getElementById('uploadBtn').disabled = false;
   });
   xhr.addEventListener('error', () => {
-    statusMsg.textContent = 'Connection error';
-    statusMsg.className = 'status-msg status-err';
-    document.getElementById('uploadBtn').disabled = false;
+    // During successful OTA, connection can drop when device restarts.
+    saveOtaRebootState({ file: file.name });
+    waitForDeviceAfterUpdate();
   });
   xhr.open('POST', '/api/update?approve=1');
   xhr.send(formData);
@@ -772,6 +874,8 @@ function connectWifi() {
 // Poll status
 function pollStatus() {
   fetch('/api/status').then(r => r.json()).then(d => {
+    document.getElementById('fwVersion').textContent = d.fw_version || '-';
+    document.getElementById('ledCount').textContent = (typeof d.num_leds !== 'undefined') ? d.num_leds : '-';
     document.getElementById('heap').textContent = Math.round(d.heap / 1024) + ' KB';
     document.getElementById('apSsid').textContent = d.ap_ssid || '-';
     document.getElementById('host').textContent = d.hostname ? (d.hostname + '.local') : '-';
@@ -808,6 +912,9 @@ function pollStatus() {
 }
 pollStatus();
 scanWifi();
+if (readOtaRebootState()) {
+  waitForDeviceAfterUpdate();
+}
 setInterval(pollStatus, 5000);
 </script>
 </body>
@@ -818,6 +925,7 @@ setInterval(pollStatus, 5000);
 void setup() {
   Serial.begin(115200);
   Serial.println("\n\n=== LED Controller Starting ===");
+  Serial.printf("FW Version: %s (built %s at %s)\n", FW_VERSION, FW_BUILD_DATE, FW_BUILD_TIME);
   bootStartedAt = millis();
   evaluateSafeModeOnBoot();
 
@@ -849,9 +957,44 @@ void loop() {
   }
   trackClientActivity();
   updateTelemetry();
+  flushOtaDebugLogs();
   maybeClearCrashCounterAfterStableUptime();
   ArduinoOTA.handle();
   updateLEDs();
+}
+
+void flushOtaDebugLogs() {
+  if (otaDbg.pendingInit) {
+    otaDbg.pendingInit = false;
+    Serial.printf("[OTA][INIT] expected=%u maxUpdate=%u heap=%u\n",
+                  otaDbg.expectedBytes,
+                  otaDbg.maxUpdateSize,
+                  otaDbg.initHeap);
+  }
+
+  if (otaDbg.pendingError) {
+    otaDbg.pendingError = false;
+    Serial.printf("[OTA][ERR] cb=%u chunks=%u off=%u req=%u wrote=%u err=%u heap=%u\n",
+                  otaDbg.cbCount,
+                  otaDbg.chunkCount,
+                  otaDbg.lastOffset,
+                  otaDbg.lastReqChunk,
+                  otaDbg.lastWrote,
+                  otaDbg.lastErr,
+                  otaDbg.lastHeap);
+  }
+
+  if (otaDbg.pendingFinal) {
+    otaDbg.pendingFinal = false;
+    Serial.printf("[OTA][FINAL] ok=%d dtMs=%u bytes=%u/%u chunks=%u maxDtUs=%u err=%u\n",
+                  otaDbg.finalOk ? 1 : 0,
+                  otaDbg.finalDtMs,
+                  otaDbg.totalBytes,
+                  otaDbg.expectedBytes,
+                  otaDbg.chunkCount,
+                  otaDbg.maxDtUs,
+                  otaDbg.lastErr);
+  }
 }
 
 void buildDeviceIdentity() {
@@ -1061,6 +1204,11 @@ String getStatusJson() {
   doc["effect"]     = state.effect;
   doc["speed"]      = state.speed;
   doc["heap"]       = ESP.getFreeHeap();
+  doc["fw_version"] = String(FW_VERSION) + " (" + FW_BUILD_DATE + " " + FW_BUILD_TIME + ")";
+  doc["fw_version_short"] = FW_VERSION;
+  doc["fw_build_date"] = FW_BUILD_DATE;
+  doc["fw_build_time"] = FW_BUILD_TIME;
+  doc["num_leds"] = NUM_LEDS;
   doc["ap_ssid"]    = apSsid;
   doc["hostname"]   = localHostname;
   doc["connected"]  = WiFi.status() == WL_CONNECTED;
@@ -1096,6 +1244,15 @@ String getStatusJson() {
   doc["heap_trend_min"] = heapWindowMin;
   doc["heap_trend_max"] = heapWindowMax;
   doc["wifi_reconnects"] = wifiReconnectCount;
+
+  JsonObject ota = doc["ota_status"].to<JsonObject>();
+  ota["in_progress"] = otaStatus.inProgress;
+  ota["last_success"] = otaStatus.lastSuccess;
+  ota["last_error_code"] = otaStatus.lastErrorCode;
+  ota["last_error_text"] = otaStatus.lastErrorText;
+  ota["written_bytes"] = otaStatus.writtenBytes;
+  ota["expected_bytes"] = otaStatus.expectedBytes;
+  ota["last_file"] = otaStatus.lastFileName;
   
   char c1[8], c2[8];
   snprintf(c1, sizeof(c1), "#%02x%02x%02x", state.color1.r, state.color1.g, state.color1.b);
@@ -1825,7 +1982,7 @@ void setupWebServer() {
     [](AsyncWebServerRequest *req) {
       JsonDocument doc;
       bool approved = req->hasParam("approve") && req->getParam("approve")->value() == "1";
-      bool success = approved && !Update.hasError() && otaStatus.expectedBytes > 0 && otaStatus.writtenBytes == otaStatus.expectedBytes;
+      bool success = approved && otaStatus.lastSuccess && !Update.hasError() && otaStatus.writtenBytes > 0;
 
       otaStatus.inProgress = false;
       otaStatus.finishedAt = millis();
@@ -1838,9 +1995,9 @@ void setupWebServer() {
       } else if (Update.hasError()) {
         otaStatus.lastErrorCode = Update.getError();
         otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-      } else if (otaStatus.writtenBytes != otaStatus.expectedBytes) {
+      } else if (!otaStatus.lastSuccess) {
         otaStatus.lastErrorCode = UPDATE_ERROR_STREAM;
-        otaStatus.lastErrorText = "Upload incomplete (written bytes mismatch).";
+        otaStatus.lastErrorText = "Upload finalization failed.";
       } else {
         otaStatus.lastErrorCode = UPDATE_ERROR_OK;
         otaStatus.lastErrorText = "OK";
@@ -1892,55 +2049,122 @@ void setupWebServer() {
         FastLED.clear(true);
         uint32_t maxSize = getMaxUpdateSize();
 
+        otaDbg.active = true;
+        otaDbg.pendingInit = true;
+        otaDbg.pendingFinal = false;
+        otaDbg.pendingError = false;
+        otaDbg.cbCount = 0;
+        otaDbg.chunkCount = 0;
+        otaDbg.totalBytes = 0;
+        otaDbg.expectedBytes = req->contentLength();
+        otaDbg.lastIdx = 0;
+        otaDbg.lastLen = 0;
+        otaDbg.lastOffset = 0;
+        otaDbg.lastReqChunk = 0;
+        otaDbg.lastWrote = 0;
+        otaDbg.lastDtUs = 0;
+        otaDbg.maxDtUs = 0;
+        otaDbg.lastHeap = ESP.getFreeHeap();
+        otaDbg.initHeap = otaDbg.lastHeap;
+        otaDbg.maxUpdateSize = maxSize;
+        otaDbg.lastErr = 0;
+        otaDbg.finalOk = false;
+        otaDbg.finalDtMs = 0;
+
         if (req->contentLength() == 0 || req->contentLength() > maxSize) {
           otaStatus.lastErrorCode = UPDATE_ERROR_SPACE;
           otaStatus.lastErrorText = "Firmware size invalid for current OTA partition.";
+          otaDbg.lastErr = otaStatus.lastErrorCode;
+          otaDbg.pendingError = true;
           otaStatus.inProgress = false;
           return;
         }
 
+        Update.runAsync(true);
+
         if (!Update.begin(maxSize, U_FLASH)) {
           otaStatus.lastErrorCode = Update.getError();
           otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-          Update.printError(Serial);
+          otaDbg.lastErr = otaStatus.lastErrorCode;
+          otaDbg.pendingError = true;
         }
       }
       if (!Update.hasError()) {
-        if (Update.write(data, len) != len) {
-          otaStatus.lastErrorCode = Update.getError();
-          otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-          Update.printError(Serial);
-        } else {
-          otaStatus.writtenBytes = index + len;
+        static uint32_t cbCounter = 0;
+        static uint32_t chunkCounter = 0;
+        cbCounter++;
+        otaDbg.cbCount = cbCounter;
+        otaDbg.lastIdx = index;
+        otaDbg.lastLen = len;
+        otaDbg.lastHeap = ESP.getFreeHeap();
+
+        size_t written = 0;
+        const size_t CHUNK_SIZE = 32;
+        
+        while (written < len && !Update.hasError()) {
+          size_t chunk = min((size_t)(len - written), CHUNK_SIZE);
+          uint32_t tStartUs = micros();
+          size_t result = Update.write(data + written, chunk);
+          uint32_t dtUs = micros() - tStartUs;
+          chunkCounter++;
+          otaDbg.chunkCount = chunkCounter;
+          otaDbg.lastOffset = index + written;
+          otaDbg.lastReqChunk = chunk;
+          otaDbg.lastWrote = result;
+          otaDbg.lastDtUs = dtUs;
+          if (dtUs > otaDbg.maxDtUs) {
+            otaDbg.maxDtUs = dtUs;
+          }
+          otaDbg.lastErr = Update.getError();
+          otaDbg.lastHeap = ESP.getFreeHeap();
+          otaDbg.totalBytes = index + written + result;
+
+          if (result != chunk) {
+            otaStatus.lastErrorCode = Update.getError();
+            otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
+            otaDbg.lastErr = otaStatus.lastErrorCode;
+            otaDbg.pendingError = true;
+            break;
+          }
+          written += chunk;
+          ESP.wdtFeed();
         }
-        // Show progress on LEDs
-        if (req->contentLength() > 0) {
-          int pct = (index + len) * 100 / req->contentLength();
-          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-          int litLeds = map(pct, 0, 100, 0, statusLeds);
-          FastLED.clear();
-          for (int i = 0; i < litLeds; i++) leds[i] = CRGB::Blue;
-          FastLED.show();
+        
+        if (written == len) {
+          otaStatus.writtenBytes = index + len;
+          otaDbg.totalBytes = otaStatus.writtenBytes;
         }
       }
       if (final) {
-        if (Update.end(true)) {
-          Serial.printf("Update OK: %u bytes\n", index + len);
-          otaStatus.writtenBytes = index + len;
-          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-          FastLED.clear();
-          fill_solid(leds, statusLeds, CRGB::Green);
-          FastLED.show();
+        // Finalize using actual written size; begin() was called with max OTA partition size
+        // so end(true) is required to close successfully at current progress.
+        uint32_t endStartMs = millis();
+        bool endOk = Update.end(true);
+        uint32_t endDtMs = millis() - endStartMs;
+        otaDbg.finalOk = endOk;
+        otaDbg.finalDtMs = endDtMs;
+        otaDbg.lastErr = Update.getError();
+        otaDbg.lastHeap = ESP.getFreeHeap();
+        otaDbg.pendingFinal = true;
+
+        if (endOk) {
+          size_t finalBytes = index + len;
+          otaStatus.writtenBytes = finalBytes;
+          otaStatus.expectedBytes = finalBytes;
+          otaDbg.totalBytes = finalBytes;
+          otaDbg.expectedBytes = finalBytes;
           otaVisualActive = false;
+          otaStatus.lastSuccess = true;
+          otaStatus.finishedAt = millis();
+          Update.runAsync(false);
         } else {
           otaStatus.lastErrorCode = Update.getError();
           otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-          Update.printError(Serial);
-          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-          FastLED.clear();
-          fill_solid(leds, statusLeds, CRGB::Red);
-          FastLED.show();
+          otaDbg.lastErr = otaStatus.lastErrorCode;
+          otaDbg.pendingError = true;
           otaVisualActive = false;
+          otaStatus.inProgress = false;
+          Update.runAsync(false);
         }
       }
     }
