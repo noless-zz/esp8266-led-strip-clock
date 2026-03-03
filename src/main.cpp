@@ -30,6 +30,7 @@ const char* AP_SSID_BASE = "LED-Controller";
 const char* AP_PASS     = "";          // Open network for captive portal
 const char* OTA_PASS    = "admin123";  // OTA & upload password
 const byte  DNS_PORT    = 53;
+const int   MAX_SCAN_CACHE = 30;
 
 // ─── Globals ─────────────────────────────────────────────
 CRGB leds[NUM_LEDS];
@@ -40,6 +41,16 @@ String apSsid;
 String localHostname;
 bool mdnsStarted = false;
 
+struct ScanCacheEntry {
+  String ssid;
+  int32_t rssi = 0;
+  int channel = -1;
+  int enc = -1;
+};
+ScanCacheEntry scanCache[MAX_SCAN_CACHE];
+int scanCacheCount = 0;
+unsigned long scanCacheUpdatedAt = 0;
+
 struct WifiConnectState {
   bool active = false;
   bool resultReady = false;
@@ -48,6 +59,14 @@ struct WifiConnectState {
   unsigned long startedAt = 0;
   unsigned long timeoutMs = 15000;
   bool reportResult = true;
+  String attemptedSsid;
+  uint8_t passLen = 0;
+  wl_status_t lastStatus = WL_IDLE_STATUS;
+  bool targetSeenInScan = false;
+  int targetChannel = -1;
+  int32_t targetRssi = 0;
+  int targetEnc = -1;
+  unsigned long lastElapsedMs = 0;
 } wifiConnect;
 
 bool beginWiFiConnectAttempt(unsigned long timeoutMs, bool reportResult) {
@@ -99,6 +118,10 @@ String getWifiScanJson();
 void buildDeviceIdentity();
 bool startWiFiConnect(const String& ssid, const String& pass);
 void updateWiFiConnect();
+const char* wifiStatusToString(wl_status_t status);
+const char* wifiEncryptionToString(int enc);
+String buildWifiFailureHint();
+String getCaptivePortalUrl();
 
 // ─── HTML Page (embedded) ────────────────────────────────
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -869,6 +892,7 @@ String getWifiScanJson() {
     doc["scanning"] = true;
   } else {
     doc["scanning"] = false;
+    scanCacheCount = 0;
     for (int i = 0; i < scanState; i++) {
       String ssid = WiFi.SSID(i);
       if (ssid.length() == 0) continue;
@@ -876,7 +900,16 @@ String getWifiScanJson() {
       obj["ssid"] = ssid;
       obj["rssi"] = WiFi.RSSI(i);
       obj["enc"]  = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
+
+      if (scanCacheCount < MAX_SCAN_CACHE) {
+        scanCache[scanCacheCount].ssid = ssid;
+        scanCache[scanCacheCount].rssi = WiFi.RSSI(i);
+        scanCache[scanCacheCount].channel = WiFi.channel(i);
+        scanCache[scanCacheCount].enc = WiFi.encryptionType(i);
+        scanCacheCount++;
+      }
     }
+    scanCacheUpdatedAt = millis();
     WiFi.scanDelete();
     if (scanState <= 0) {
       WiFi.scanNetworks(true, true);
@@ -887,6 +920,62 @@ String getWifiScanJson() {
   String out;
   serializeJson(doc, out);
   return out;
+}
+
+const char* wifiStatusToString(wl_status_t status) {
+  switch (status) {
+    case WL_NO_SHIELD: return "NO_SHIELD";
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID";
+    case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_WRONG_PASSWORD: return "WRONG_PASSWORD";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
+}
+
+const char* wifiEncryptionToString(int enc) {
+  switch (enc) {
+    case ENC_TYPE_NONE: return "OPEN";
+    case ENC_TYPE_WEP: return "WEP";
+    case ENC_TYPE_TKIP: return "WPA_TKIP";
+    case ENC_TYPE_CCMP: return "WPA2_CCMP";
+    case ENC_TYPE_AUTO: return "AUTO";
+    default: return "UNKNOWN";
+  }
+}
+
+String buildWifiFailureHint() {
+  if (!wifiConnect.targetSeenInScan) {
+    if (scanCacheCount <= 0 || scanCacheUpdatedAt == 0) {
+      return "No recent scan cache available. Press Scan again before Connect. ESP8266 is 2.4GHz-only (cannot join 5GHz).";
+    }
+    return "SSID not seen in scan. ESP8266 is 2.4GHz-only (cannot join 5GHz). Ensure 2.4GHz SSID broadcast is enabled.";
+  }
+
+  if (wifiConnect.lastStatus == WL_WRONG_PASSWORD) {
+    return "Wrong password or incompatible security mode. Use WPA2/WPA mixed mode (WPA3-only is not supported on ESP8266).";
+  }
+
+  if (wifiConnect.lastStatus == WL_NO_SSID_AVAIL) {
+    return "AP not available right now. Check signal, channel, and whether MAC filtering is enabled.";
+  }
+
+  if (wifiConnect.lastStatus == WL_CONNECT_FAILED) {
+    return "Association/authentication failed. Try WPA2-PSK AES, avoid WPA3-only/enterprise, and verify router compatibility.";
+  }
+
+  return "Connection timed out. Verify 2.4GHz SSID, password, security mode, and signal quality.";
+}
+
+String getCaptivePortalUrl() {
+  if ((WiFi.getMode() & WIFI_AP) != 0) {
+    return String("http://") + WiFi.softAPIP().toString() + "/";
+  }
+  return String("http://") + localHostname + ".local/";
 }
 
 bool startWiFiConnect(const String& ssid, const String& pass) {
@@ -900,8 +989,42 @@ bool startWiFiConnect(const String& ssid, const String& pass) {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.hostname(localHostname.c_str());
+
+  wifiConnect.attemptedSsid = ssid;
+  wifiConnect.passLen = pass.length();
+  wifiConnect.lastStatus = WiFi.status();
+  wifiConnect.targetSeenInScan = false;
+  wifiConnect.targetChannel = -1;
+  wifiConnect.targetRssi = 0;
+  wifiConnect.targetEnc = -1;
+  wifiConnect.lastElapsedMs = 0;
+
+  if (scanCacheCount > 0) {
+    for (int i = 0; i < scanCacheCount; i++) {
+      if (scanCache[i].ssid == ssid) {
+        wifiConnect.targetSeenInScan = true;
+        wifiConnect.targetChannel = scanCache[i].channel;
+        wifiConnect.targetRssi = scanCache[i].rssi;
+        wifiConnect.targetEnc = scanCache[i].enc;
+        break;
+      }
+    }
+  }
+
   WiFi.begin(ssid.c_str(), pass.c_str());
-  Serial.println("Connecting to SSID: " + ssid);
+  Serial.println("[WiFi] Connecting...");
+  Serial.println("[WiFi] SSID: " + ssid);
+  Serial.printf("[WiFi] Password length: %u\n", wifiConnect.passLen);
+  Serial.printf("[WiFi] Status before begin: %s (%d)\n", wifiStatusToString(wifiConnect.lastStatus), wifiConnect.lastStatus);
+  if (wifiConnect.targetSeenInScan) {
+    Serial.printf("[WiFi] Target seen in scan: yes, CH=%d RSSI=%d ENC=%s (%d)\n",
+      wifiConnect.targetChannel,
+      (int)wifiConnect.targetRssi,
+      wifiEncryptionToString(wifiConnect.targetEnc),
+      wifiConnect.targetEnc);
+  } else {
+    Serial.printf("[WiFi] Target seen in last scan cache: no (cache_count=%d, age_ms=%lu)\n", scanCacheCount, millis() - scanCacheUpdatedAt);
+  }
 
   return true;
 }
@@ -910,6 +1033,9 @@ void updateWiFiConnect() {
   if (!wifiConnect.active) {
     return;
   }
+
+  wifiConnect.lastStatus = WiFi.status();
+  wifiConnect.lastElapsedMs = millis() - wifiConnect.startedAt;
 
   if (WiFi.status() == WL_CONNECTED) {
     WiFi.softAPdisconnect(true);
@@ -923,15 +1049,39 @@ void updateWiFiConnect() {
     wifiConnect.resultReady = wifiConnect.reportResult;
     wifiConnect.success = true;
     wifiConnect.error = "";
+    Serial.printf("[WiFi] Connected to %s in %lu ms\n", wifiConnect.attemptedSsid.c_str(), wifiConnect.lastElapsedMs);
+    Serial.printf("[WiFi] STA IP: %s, BSSID: %s, CH: %d, RSSI: %d\n",
+      WiFi.localIP().toString().c_str(),
+      WiFi.BSSIDstr().c_str(),
+      WiFi.channel(),
+      WiFi.RSSI());
     return;
   }
 
   if (millis() - wifiConnect.startedAt >= wifiConnect.timeoutMs) {
-    Serial.println("WiFi connect failed");
+    String hint = buildWifiFailureHint();
+    String errorText = String("Could not connect to '") + wifiConnect.attemptedSsid +
+      "'. status=" + wifiStatusToString(wifiConnect.lastStatus) +
+      " (" + String((int)wifiConnect.lastStatus) + "). " + hint;
+
+    Serial.println("[WiFi] Connect failed");
+    Serial.printf("[WiFi] SSID: %s, elapsed: %lu ms\n", wifiConnect.attemptedSsid.c_str(), wifiConnect.lastElapsedMs);
+    Serial.printf("[WiFi] Final status: %s (%d)\n", wifiStatusToString(wifiConnect.lastStatus), wifiConnect.lastStatus);
+    if (wifiConnect.targetSeenInScan) {
+      Serial.printf("[WiFi] Scan cache target: CH=%d RSSI=%d ENC=%s (%d)\n",
+        wifiConnect.targetChannel,
+        (int)wifiConnect.targetRssi,
+        wifiEncryptionToString(wifiConnect.targetEnc),
+        wifiConnect.targetEnc);
+    } else {
+      Serial.println("[WiFi] Scan cache target: not seen");
+    }
+    Serial.println("[WiFi] Hint: " + hint);
+
     wifiConnect.active = false;
     wifiConnect.resultReady = wifiConnect.reportResult;
     wifiConnect.success = false;
-    wifiConnect.error = "Could not connect. Check password/signal.";
+    wifiConnect.error = errorText;
   }
 }
 
@@ -948,28 +1098,28 @@ void setupWebServer() {
   // ── Captive portal detection endpoints ──
   // Android
   server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   // Apple
   server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   server.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   // Microsoft
   server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
   // Firefox
   server.on("/canonical.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
 
   // ── Main page ──
@@ -1062,6 +1212,20 @@ void setupWebServer() {
       }
     }
 
+    JsonObject debug = doc["debug"].to<JsonObject>();
+    debug["ssid"] = wifiConnect.attemptedSsid;
+    debug["status"] = wifiStatusToString(wifiConnect.lastStatus);
+    debug["status_code"] = (int)wifiConnect.lastStatus;
+    debug["elapsed_ms"] = wifiConnect.lastElapsedMs;
+    debug["target_seen"] = wifiConnect.targetSeenInScan;
+    debug["target_channel"] = wifiConnect.targetChannel;
+    debug["target_rssi"] = wifiConnect.targetRssi;
+    debug["target_encryption"] = wifiEncryptionToString(wifiConnect.targetEnc);
+    debug["target_encryption_code"] = wifiConnect.targetEnc;
+    debug["scan_cache_count"] = scanCacheCount;
+    debug["scan_cache_age_ms"] = scanCacheUpdatedAt > 0 ? (millis() - scanCacheUpdatedAt) : -1;
+    debug["hint"] = buildWifiFailureHint();
+
     String out;
     serializeJson(doc, out);
     req->send(200, "application/json", out);
@@ -1124,7 +1288,7 @@ void setupWebServer() {
 
   // ── Catch-all for captive portal ──
   server.onNotFound([](AsyncWebServerRequest *req) {
-    req->redirect("http://192.168.4.1/");
+    req->redirect(getCaptivePortalUrl());
   });
 
   server.begin();
