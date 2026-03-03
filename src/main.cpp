@@ -21,7 +21,7 @@
 
 // ─── Configuration ───────────────────────────────────────
 #ifndef NUM_LEDS
-#define NUM_LEDS 5
+#define NUM_LEDS 60
 #endif
 #ifndef LED_PIN
 #define LED_PIN D4
