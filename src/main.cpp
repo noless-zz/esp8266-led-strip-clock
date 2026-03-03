@@ -31,6 +31,7 @@ const char* AP_PASS     = "";          // Open network for captive portal
 const char* OTA_PASS    = "admin123";  // OTA & upload password
 const byte  DNS_PORT    = 53;
 const int   MAX_SCAN_CACHE = 30;
+const unsigned long STA_RETRY_INTERVAL = 180000; // 3 minutes
 
 // ─── Globals ─────────────────────────────────────────────
 CRGB leds[NUM_LEDS];
@@ -50,6 +51,11 @@ struct ScanCacheEntry {
 ScanCacheEntry scanCache[MAX_SCAN_CACHE];
 int scanCacheCount = 0;
 unsigned long scanCacheUpdatedAt = 0;
+
+// Periodic STA retry & session tracking
+unsigned long lastStaRetryAt = 0;
+unsigned long lastClientActivity = 0;
+int activeClientCount = 0;
 
 struct WifiConnectState {
   bool active = false;
@@ -118,6 +124,9 @@ String getWifiScanJson();
 void buildDeviceIdentity();
 bool startWiFiConnect(const String& ssid, const String& pass);
 void updateWiFiConnect();
+void checkPeriodicStaRetry();
+void ensureApFallback();
+void trackClientActivity();
 const char* wifiStatusToString(wl_status_t status);
 const char* wifiEncryptionToString(int enc);
 String buildWifiFailureHint();
@@ -459,6 +468,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="info-row"><span>IP</span><span id="ip">-</span></div>
     <div class="info-row"><span>Heap</span><span id="heap">-</span></div>
   </div>
+
+  <!-- Connection Stats -->
+  <div class="card" id="staCard" style="display:none">
+    <div class="card-title">WIFI CONNECTION</div>
+    <div class="info-row"><span>SSID</span><span id="staSsid">-</span></div>
+    <div class="info-row"><span>Signal</span><span id="staSignal">-</span></div>
+    <div class="info-row"><span>Quality</span><span id="staQuality">-</span></div>
+    <div class="info-row"><span>Channel</span><span id="staChannel">-</span></div>
+    <div class="info-row"><span>BSSID</span><span id="staBssid">-</span></div>
+  </div>
 </div>
 
 <script>
@@ -642,6 +661,19 @@ function pollStatus() {
     document.getElementById('speed').value = d.speed;
     document.getElementById('spVal').textContent = d.speed;
     document.querySelectorAll('.fx-btn').forEach((b, i) => b.classList.toggle('active', i === d.effect));
+    
+    // Update connection stats
+    const staCard = document.getElementById('staCard');
+    if (d.connected && d.sta_ssid) {
+      staCard.style.display = 'block';
+      document.getElementById('staSsid').textContent = d.sta_ssid;
+      document.getElementById('staSignal').textContent = d.sta_rssi + ' dBm';
+      document.getElementById('staQuality').textContent = d.sta_quality;
+      document.getElementById('staChannel').textContent = d.sta_channel;
+      document.getElementById('staBssid').textContent = d.sta_bssid;
+    } else {
+      staCard.style.display = 'none';
+    }
   }).catch(() => {});
 }
 pollStatus();
@@ -676,6 +708,8 @@ void loop() {
     setupMDNS();
   }
   updateWiFiConnect();
+  checkPeriodicStaRetry();
+  trackClientActivity();
   ArduinoOTA.handle();
   updateLEDs();
 }
@@ -868,6 +902,29 @@ String getStatusJson() {
   doc["hostname"]   = localHostname;
   doc["connected"]  = WiFi.status() == WL_CONNECTED;
   doc["ip"]         = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  
+  // Connection stats
+  if (WiFi.status() == WL_CONNECTED) {
+    doc["sta_ssid"]  = WiFi.SSID();
+    doc["sta_rssi"]  = WiFi.RSSI();
+    doc["sta_channel"] = WiFi.channel();
+    doc["sta_bssid"] = WiFi.BSSIDstr();
+    int rssi = WiFi.RSSI();
+    String quality = "Excellent";
+    if (rssi < -80) quality = "Poor";
+    else if (rssi < -70) quality = "Fair";
+    else if (rssi < -60) quality = "Good";
+    doc["sta_quality"] = quality;
+  } else {
+    doc["sta_ssid"]  = WiFi.SSID().length() > 0 ? WiFi.SSID() : "";
+    doc["sta_rssi"]  = 0;
+    doc["sta_channel"] = 0;
+    doc["sta_bssid"] = "";
+    doc["sta_quality"] = "Not connected";
+  }
+  doc["ap_active"]  = (WiFi.getMode() & WIFI_AP) != 0;
+  doc["ap_clients"] = WiFi.softAPgetStationNum();
+  
   char c1[8], c2[8];
   snprintf(c1, sizeof(c1), "#%02x%02x%02x", state.color1.r, state.color1.g, state.color1.b);
   snprintf(c2, sizeof(c2), "#%02x%02x%02x", state.color2.r, state.color2.g, state.color2.b);
@@ -1082,6 +1139,59 @@ void updateWiFiConnect() {
     wifiConnect.resultReady = wifiConnect.reportResult;
     wifiConnect.success = false;
     wifiConnect.error = errorText;
+    
+    // Fallback to AP mode on failure
+    ensureApFallback();
+  }
+}
+
+void ensureApFallback() {
+  if ((WiFi.getMode() & WIFI_AP) == 0) {
+    Serial.println("[WiFi] STA failed, re-enabling AP fallback");
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(apSsid.c_str(), AP_PASS);
+    delay(100);
+    setupDNS();
+    Serial.print("[WiFi] AP fallback IP: ");
+    Serial.println(WiFi.softAPIP());
+  }
+}
+
+void trackClientActivity() {
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck < 5000) return;
+  lastCheck = millis();
+  
+  activeClientCount = WiFi.softAPgetStationNum();
+  if (activeClientCount > 0) {
+    lastClientActivity = millis();
+  }
+}
+
+void checkPeriodicStaRetry() {
+  // Only retry if:
+  // 1. Not currently connecting
+  // 2. Not connected
+  // 3. Have saved credentials
+  // 4. Retry interval elapsed
+  // 5. No active clients (or client inactive for 2min)
+  
+  if (wifiConnect.active) return;
+  if (WiFi.status() == WL_CONNECTED) return;
+  if (WiFi.SSID().length() == 0) return;
+  if (millis() - lastStaRetryAt < STA_RETRY_INTERVAL) return;
+  
+  bool hasRecentActivity = (millis() - lastClientActivity < 120000);
+  if (activeClientCount > 0 && hasRecentActivity) return;
+  
+  Serial.println("[WiFi] Periodic STA retry attempt");
+  lastStaRetryAt = millis();
+  
+  if (beginWiFiConnectAttempt(15000, false)) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.hostname(localHostname.c_str());
+    WiFi.begin();
+    Serial.printf("[WiFi] Retrying saved SSID: %s\n", WiFi.SSID().c_str());
   }
 }
 
