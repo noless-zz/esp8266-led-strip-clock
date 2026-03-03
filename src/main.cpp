@@ -17,6 +17,7 @@
 #include <ESP8266mDNS.h>
 #include <FastLED.h>
 #include <Updater.h>
+#include <EEPROM.h>
 
 // ─── Configuration ───────────────────────────────────────
 #ifndef NUM_LEDS
@@ -32,6 +33,11 @@ const char* OTA_PASS    = "admin123";  // OTA & upload password
 const byte  DNS_PORT    = 53;
 const int   MAX_SCAN_CACHE = 30;
 const unsigned long STA_RETRY_INTERVAL = 180000; // 3 minutes
+const int   OTA_STATUS_LEDS = 5;
+const int   EEPROM_SIZE = 16;
+const int   EEPROM_MAGIC_ADDR = 0;
+const int   EEPROM_POWER_ADDR = 1;
+const uint8_t EEPROM_MAGIC = 0xA7;
 
 // ─── Globals ─────────────────────────────────────────────
 CRGB leds[NUM_LEDS];
@@ -41,6 +47,7 @@ String deviceId;
 String apSsid;
 String localHostname;
 bool mdnsStarted = false;
+bool otaVisualActive = false;
 
 struct ScanCacheEntry {
   String ssid;
@@ -131,6 +138,8 @@ const char* wifiStatusToString(wl_status_t status);
 const char* wifiEncryptionToString(int enc);
 String buildWifiFailureHint();
 String getCaptivePortalUrl();
+void loadLedPowerState();
+void saveLedPowerState();
 
 // ─── HTML Page (embedded) ────────────────────────────────
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -691,6 +700,7 @@ void setup() {
 
   buildDeviceIdentity();
   setupLEDs();
+  loadLedPowerState();
   setupWiFi();
   setupDNS();
   setupMDNS();
@@ -769,12 +779,15 @@ void setupOTA() {
   ArduinoOTA.setHostname(localHostname.c_str());
   ArduinoOTA.setPassword(OTA_PASS);
   ArduinoOTA.onStart([]() {
-    FastLED.clear(true);
+    otaVisualActive = true;
+    FastLED.clear();
+    FastLED.show();
     Serial.println("OTA Start");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     uint8_t pct = progress / (total / 100);
-    int litLeds = map(pct, 0, 100, 0, NUM_LEDS);
+    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+    int litLeds = map(pct, 0, 100, 0, statusLeds);
     FastLED.clear();
     for (int i = 0; i < litLeds; i++) {
       leds[i] = CRGB(0, 255, 0);
@@ -782,13 +795,19 @@ void setupOTA() {
     FastLED.show();
   });
   ArduinoOTA.onEnd([]() {
-    fill_solid(leds, NUM_LEDS, CRGB::Green);
+    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+    FastLED.clear();
+    fill_solid(leds, statusLeds, CRGB::Green);
     FastLED.show();
+    otaVisualActive = false;
     Serial.println("OTA Done!");
   });
   ArduinoOTA.onError([](ota_error_t error) {
-    fill_solid(leds, NUM_LEDS, CRGB::Red);
+    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+    FastLED.clear();
+    fill_solid(leds, statusLeds, CRGB::Red);
     FastLED.show();
+    otaVisualActive = false;
     Serial.printf("OTA Error[%u]\n", error);
   });
   ArduinoOTA.begin();
@@ -802,6 +821,10 @@ void setupLEDs() {
 }
 
 void updateLEDs() {
+  if (otaVisualActive) {
+    return;
+  }
+
   if (!state.power) {
     EVERY_N_MILLISECONDS(100) {
       FastLED.clear(true);
@@ -977,6 +1000,26 @@ String getWifiScanJson() {
   String out;
   serializeJson(doc, out);
   return out;
+}
+
+void loadLedPowerState() {
+  EEPROM.begin(EEPROM_SIZE);
+  uint8_t magic = EEPROM.read(EEPROM_MAGIC_ADDR);
+  if (magic == EEPROM_MAGIC) {
+    state.power = EEPROM.read(EEPROM_POWER_ADDR) == 1;
+  } else {
+    EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+    EEPROM.write(EEPROM_POWER_ADDR, state.power ? 1 : 0);
+    EEPROM.commit();
+  }
+  Serial.printf("[LED] Restored power state: %s\n", state.power ? "ON" : "OFF");
+}
+
+void saveLedPowerState() {
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+  EEPROM.write(EEPROM_POWER_ADDR, state.power ? 1 : 0);
+  EEPROM.commit();
+  Serial.printf("[LED] Saved power state: %s\n", state.power ? "ON" : "OFF");
 }
 
 const char* wifiStatusToString(wl_status_t status) {
@@ -1244,7 +1287,11 @@ void setupWebServer() {
 
   server.on("/api/power", HTTP_GET, [](AsyncWebServerRequest *req) {
     if (req->hasParam("on")) {
-      state.power = req->getParam("on")->value() == "1";
+      bool newPower = req->getParam("on")->value() == "1";
+      if (state.power != newPower) {
+        state.power = newPower;
+        saveLedPowerState();
+      }
     }
     req->send(200, "application/json", getStatusJson());
   });
@@ -1361,6 +1408,7 @@ void setupWebServer() {
     // Upload handler
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
       if (index == 0) {
+        otaVisualActive = true;
         Serial.printf("Update: %s (%u bytes)\n", filename.c_str(), req->contentLength());
         // Disable LEDs during update
         FastLED.clear(true);
@@ -1376,7 +1424,8 @@ void setupWebServer() {
         // Show progress on LEDs
         if (req->contentLength() > 0) {
           int pct = (index + len) * 100 / req->contentLength();
-          int litLeds = map(pct, 0, 100, 0, NUM_LEDS);
+          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+          int litLeds = map(pct, 0, 100, 0, statusLeds);
           FastLED.clear();
           for (int i = 0; i < litLeds; i++) leds[i] = CRGB::Blue;
           FastLED.show();
@@ -1385,12 +1434,18 @@ void setupWebServer() {
       if (final) {
         if (Update.end(true)) {
           Serial.printf("Update OK: %u bytes\n", index + len);
-          fill_solid(leds, NUM_LEDS, CRGB::Green);
+          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+          FastLED.clear();
+          fill_solid(leds, statusLeds, CRGB::Green);
           FastLED.show();
+          otaVisualActive = false;
         } else {
           Update.printError(Serial);
-          fill_solid(leds, NUM_LEDS, CRGB::Red);
+          int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
+          FastLED.clear();
+          fill_solid(leds, statusLeds, CRGB::Red);
           FastLED.show();
+          otaVisualActive = false;
         }
       }
     }
