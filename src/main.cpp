@@ -487,12 +487,24 @@ function uploadFirmware() {
   xhr.send(formData);
 }
 
-function scanWifi() {
+function scanWifi(attempt = 0) {
   const list = document.getElementById('ssidList');
   const msg = document.getElementById('wifiMsg');
-  msg.textContent = 'Scanning...';
-  msg.className = 'status-msg';
+  if (attempt === 0) {
+    msg.textContent = 'Scanning...';
+    msg.className = 'status-msg';
+  }
   fetch('/api/wifi/scan').then(r => r.json()).then(d => {
+    if (d.scanning) {
+      if (attempt > 25) {
+        msg.textContent = 'Scan timeout';
+        msg.className = 'status-msg status-err';
+        return;
+      }
+      setTimeout(() => scanWifi(attempt + 1), 350);
+      return;
+    }
+
     list.innerHTML = '';
     if (!d.networks || d.networks.length === 0) {
       const opt = document.createElement('option');
@@ -802,16 +814,30 @@ String getWifiScanJson() {
   JsonDocument doc;
   JsonArray arr = doc["networks"].to<JsonArray>();
 
-  int count = WiFi.scanNetworks();
-  for (int i = 0; i < count; i++) {
-    String ssid = WiFi.SSID(i);
-    if (ssid.length() == 0) continue;
-    JsonObject obj = arr.add<JsonObject>();
-    obj["ssid"] = ssid;
-    obj["rssi"] = WiFi.RSSI(i);
-    obj["enc"]  = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
+  int scanState = WiFi.scanComplete();
+
+  if (scanState == WIFI_SCAN_RUNNING) {
+    doc["scanning"] = true;
+  } else if (scanState == WIFI_SCAN_FAILED) {
+    WiFi.scanDelete();
+    WiFi.scanNetworks(true, true);
+    doc["scanning"] = true;
+  } else {
+    doc["scanning"] = false;
+    for (int i = 0; i < scanState; i++) {
+      String ssid = WiFi.SSID(i);
+      if (ssid.length() == 0) continue;
+      JsonObject obj = arr.add<JsonObject>();
+      obj["ssid"] = ssid;
+      obj["rssi"] = WiFi.RSSI(i);
+      obj["enc"]  = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
+    }
+    WiFi.scanDelete();
+    if (scanState <= 0) {
+      WiFi.scanNetworks(true, true);
+      doc["scanning"] = true;
+    }
   }
-  WiFi.scanDelete();
 
   String out;
   serializeJson(doc, out);
