@@ -2,7 +2,7 @@
  * ESP8266 WS2812 LED Controller with Captive Portal & OTA
  * --------------------------------------------------------
  * - Captive WiFi hotspot with web UI
- * - WS2812 LED chain control (65 LEDs)
+ * - WS2812 LED chain control (5 LEDs)
  * - OTA firmware update over WiFi
  * - Multiple LED effects & color control
  */
@@ -20,7 +20,7 @@
 
 // ─── Configuration ───────────────────────────────────────
 #ifndef NUM_LEDS
-#define NUM_LEDS 65
+#define NUM_LEDS 5
 #endif
 #ifndef LED_PIN
 #define LED_PIN D4

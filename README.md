@@ -4,7 +4,7 @@ Captive portal WiFi hotspot for controlling a 65-LED WS2812 strip, with OTA firm
 
 ## Hardware
 - **Board:** Wemos D1 Mini (ESP8266)
-- **LEDs:** WS2812 chain × 65 on pin **D4**
+- **LEDs:** WS2812 chain × 5 on pin **D4**
 - **Power:** Supply 5V to LEDs separately (65 LEDs ≈ 3.5A max)
 
 ## Features
@@ -42,7 +42,7 @@ pio run -t upload --upload-port 192.168.4.1
 Edit defines in `platformio.ini` build_flags:
 | Flag | Default | Description |
 |------|---------|-------------|
-| `NUM_LEDS` | 65 | Number of LEDs |
+| `NUM_LEDS` | 5 | Number of LEDs |
 | `LED_PIN` | D4 | Data pin |
 | `HOSTNAME` | LedController | mDNS / OTA name |
 
