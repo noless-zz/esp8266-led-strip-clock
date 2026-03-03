@@ -1407,7 +1407,7 @@ bool startWiFiConnect(const String& ssid, const String& pass) {
   delay(100);
   WiFi.hostname(localHostname.c_str());
   
-  WiFi.persistent(false);
+  WiFi.persistent(true);
 
   wifiConnect.attemptedSsid = ssid;
   wifiConnect.passLen = pass.length();
