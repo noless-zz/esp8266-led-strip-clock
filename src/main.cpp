@@ -46,7 +46,24 @@ struct WifiConnectState {
   bool success = false;
   String error;
   unsigned long startedAt = 0;
+  unsigned long timeoutMs = 15000;
+  bool reportResult = true;
 } wifiConnect;
+
+bool beginWiFiConnectAttempt(unsigned long timeoutMs, bool reportResult) {
+  if (wifiConnect.active) {
+    return false;
+  }
+
+  wifiConnect.active = true;
+  wifiConnect.resultReady = false;
+  wifiConnect.success = false;
+  wifiConnect.error = "";
+  wifiConnect.startedAt = millis();
+  wifiConnect.timeoutMs = timeoutMs;
+  wifiConnect.reportResult = reportResult;
+  return true;
+}
 
 // LED State
 struct LedState {
@@ -660,16 +677,9 @@ void setupWiFi() {
   Serial.print("AP IP: ");
   Serial.println(WiFi.softAPIP());
 
-  WiFi.begin(); // try saved STA credentials
-  unsigned long started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) {
-    delay(200);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("STA connected IP: ");
-    Serial.println(WiFi.localIP());
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_STA);
+  if (WiFi.SSID().length() > 0 && beginWiFiConnectAttempt(8000, false)) {
+    WiFi.begin(); // try saved STA credentials (non-blocking)
+    Serial.println("Trying saved STA credentials...");
   }
 }
 
@@ -884,15 +894,9 @@ bool startWiFiConnect(const String& ssid, const String& pass) {
     return false;
   }
 
-  if (wifiConnect.active) {
+  if (!beginWiFiConnectAttempt(15000, true)) {
     return false;
   }
-
-  wifiConnect.active = true;
-  wifiConnect.resultReady = false;
-  wifiConnect.success = false;
-  wifiConnect.error = "";
-  wifiConnect.startedAt = millis();
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.hostname(localHostname.c_str());
@@ -916,16 +920,16 @@ void updateWiFiConnect() {
     Serial.println(WiFi.localIP());
 
     wifiConnect.active = false;
-    wifiConnect.resultReady = true;
+    wifiConnect.resultReady = wifiConnect.reportResult;
     wifiConnect.success = true;
     wifiConnect.error = "";
     return;
   }
 
-  if (millis() - wifiConnect.startedAt >= 15000) {
+  if (millis() - wifiConnect.startedAt >= wifiConnect.timeoutMs) {
     Serial.println("WiFi connect failed");
     wifiConnect.active = false;
-    wifiConnect.resultReady = true;
+    wifiConnect.resultReady = wifiConnect.reportResult;
     wifiConnect.success = false;
     wifiConnect.error = "Could not connect. Check password/signal.";
   }
