@@ -35,6 +35,20 @@ const char* NTP_SERVER = "pool.ntp.org";
 const byte DNS_PORT = 53;
 const int MAX_SCAN_CACHE = 30;
 
+// Display modes
+enum DisplayMode {
+  DISPLAY_SOLID = 0,        // Hour/min/sec overlay
+  DISPLAY_PROGRESS_BAR = 1, // Time as % fill (0-100% throughout day)
+  DISPLAY_PULSE_DOTS = 2,   // Dots pulse to seconds rhythm
+  DISPLAY_GRADIENT = 3,     // Color shifts throughout day
+  DISPLAY_BINARY = 4,       // Binary clock (hour/min/sec both)
+  DISPLAY_HOUR_MARKER = 5,  // Bright LED marks hour, dimmer fills minutes
+  DISPLAY_STROBE = 6,       // Flashes per second (1-60)
+  DISPLAY_RAINBOW = 7,      // Scrolling rainbow animation
+  DISPLAY_FLAME = 8,        // Flickering fire effect
+  DISPLAY_MAX = 9
+};
+
 // EEPROM Layout
 const int EEPROM_SIZE = 512;
 const int EEPROM_MAGIC_ADDR = 0;
@@ -42,6 +56,7 @@ const int EEPROM_SSID_ADDR = 1;
 const int EEPROM_PASS_ADDR = 65;
 const int EEPROM_BRIGHTNESS_ADDR = 129;
 const int EEPROM_TZ_OFFSET_ADDR = 130;
+const int EEPROM_DISPLAY_MODE_ADDR = 134;
 const uint8_t EEPROM_MAGIC = 0xA7;
 const int MAX_SSID_LEN = 32;
 const int MAX_PASS_LEN = 64;
@@ -49,6 +64,7 @@ const int MAX_PASS_LEN = 64;
 // Global state - LEDs
 Adafruit_NeoPixel *ledStrip = nullptr;
 uint8_t ledBrightness = 76;  // 30%
+DisplayMode displayMode = DISPLAY_SOLID;
 struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
 
 // Web server
@@ -105,6 +121,17 @@ struct {
   unsigned long finishedAt = 0;
 } otaStatus;
 
+// Forward declarations for display functions
+void displayMode_ProgressBar();
+void displayMode_PulseDots();
+void displayMode_Gradient();
+void displayMode_Binary();
+void displayMode_HourMarker();
+void displayMode_Strobe();
+void displayMode_Rainbow();
+void displayMode_Flame();
+void displayClock_Solid();
+
 // ============================================================================
 // LED Functions
 // ============================================================================
@@ -127,48 +154,307 @@ void showLEDs() {
   ledStrip->show();
 }
 
-void displayClock() {
+// ============================================================================
+// Display Mode Functions
+// ============================================================================
+
+uint8_t addSat(uint8_t base, uint8_t add) {
+  uint16_t v = (uint16_t)base + add;
+  return (v > 255) ? 255 : (uint8_t)v;
+}
+
+void addPixelWrap(int index, uint8_t r, uint8_t g, uint8_t b) {
+  int pos = index % NUM_LEDS;
+  if (pos < 0) pos += NUM_LEDS;
+  leds[pos].r = addSat(leds[pos].r, r);
+  leds[pos].g = addSat(leds[pos].g, g);
+  leds[pos].b = addSat(leds[pos].b, b);
+}
+
+void hsvToRgb(uint16_t hue, uint8_t sat, uint8_t val, uint8_t &r, uint8_t &g, uint8_t &b) {
+  hue %= 360;
+  uint8_t region = hue / 60;
+  uint16_t rem = (hue % 60) * 255 / 60;
+  uint8_t p = (uint16_t)val * (255 - sat) / 255;
+  uint8_t q = (uint16_t)val * (255 - ((uint16_t)sat * rem / 255)) / 255;
+  uint8_t t = (uint16_t)val * (255 - ((uint16_t)sat * (255 - rem) / 255)) / 255;
+  switch (region) {
+    case 0: r = val; g = t; b = p; break;
+    case 1: r = q; g = val; b = p; break;
+    case 2: r = p; g = val; b = t; break;
+    case 3: r = p; g = q; b = val; break;
+    case 4: r = t; g = p; b = val; break;
+    default: r = val; g = p; b = q; break;
+  }
+}
+
+void applyBrightnessAndShow() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i].r = (uint16_t)leds[i].r * ledBrightness / 255;
+    leds[i].g = (uint16_t)leds[i].g * ledBrightness / 255;
+    leds[i].b = (uint16_t)leds[i].b * ledBrightness / 255;
+  }
+  showLEDs();
+}
+
+bool extractClock(int &hour12, int &hour24, int &minute, int &second, int &daySeconds) {
   time_t now = time(nullptr);
   if (now < 86400) {
-    // Not synced yet, show red at edges
     memset(leds, 0, sizeof(leds));
     leds[0] = {255, 0, 0};
-    leds[NUM_LEDS-1] = {255, 0, 0};
+    leds[NUM_LEDS - 1] = {255, 0, 0};
     showLEDs();
-    return;
+    return false;
   }
-  
   struct tm* t = localtime(&now);
-  uint8_t hour = t->tm_hour % 12;
-  uint8_t min = t->tm_min;
-  uint8_t sec = t->tm_sec;
-  
+  hour24 = t->tm_hour;
+  hour12 = t->tm_hour % 12;
+  minute = t->tm_min;
+  second = t->tm_sec;
+  daySeconds = hour24 * 3600 + minute * 60 + second;
+  return true;
+}
+
+void overlayTimeMarkers(int hour12, int minute, int second, int secTrailLen) {
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+  int minutePos = minute % NUM_LEDS;
+  int secondPos = second % NUM_LEDS;
+
+  for (int i = -2; i <= 2; i++) {
+    uint8_t level = (i == 0) ? 255 : ((abs(i) == 1) ? 170 : 90);
+    addPixelWrap(hourPos + i, level, 30, 30);
+  }
+
+  for (int i = -1; i <= 1; i++) {
+    uint8_t level = (i == 0) ? 255 : 120;
+    addPixelWrap(minutePos + i, 30, level, 30);
+  }
+
+  for (int i = 0; i < secTrailLen; i++) {
+    uint8_t level = 255 - (i * 210 / secTrailLen);
+    addPixelWrap(secondPos - i, 30, 60, level);
+  }
+}
+
+void displayMode_ProgressBar() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
   memset(leds, 0, sizeof(leds));
-  
-  if (min < NUM_LEDS) leds[min] = {0, 255, 0};  // Green minute
-  
-  // 3 red LEDs for hour (5 LEDs per hour: 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
-  int hpos = (hour * 5) % NUM_LEDS;
-  for (int i = 0; i < 3; i++) {
-    int pos = (hpos + i) % NUM_LEDS;
-    uint8_t r = (uint16_t)leds[pos].r + 255; if (r > 255) r = 255;
-    leds[pos] = {r, leds[pos].g, leds[pos].b};
-  }
-  
-  // Blue second
-  if (sec < NUM_LEDS) {
-    uint8_t b = leds[sec].b + 255; if (b > 255) b = 255;
-    leds[sec] = {leds[sec].r, leds[sec].g, b};
-  }
-  
-  // Apply brightness
+  int fill = (int)((uint32_t)daySeconds * NUM_LEDS / 86400);
+  uint32_t ms = millis();
+  uint8_t pulse = 90 + (uint8_t)((ms % 1000) * 120 / 1000);
+
   for (int i = 0; i < NUM_LEDS; i++) {
-    leds[i].r = (leds[i].r * ledBrightness) / 255;
-    leds[i].g = (leds[i].g * ledBrightness) / 255;
-    leds[i].b = (leds[i].b * ledBrightness) / 255;
+    uint8_t r, g, b;
+    if (i <= fill) {
+      hsvToRgb((i * 240 / NUM_LEDS) + (second * 2), 255, pulse, r, g, b);
+      leds[i] = {r, g, b};
+    } else {
+      leds[i] = {8, 8, 16};
+    }
   }
-  
-  showLEDs();
+
+  overlayTimeMarkers(hour12, minute, second, 8);
+  applyBrightnessAndShow();
+}
+
+void displayMode_PulseDots() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  uint32_t ms = millis();
+  uint8_t beat = (uint8_t)((ms % 1000) < 500 ? ((ms % 500) * 255 / 500) : ((1000 - (ms % 1000)) * 255 / 500));
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    int ring = i % 5;
+    uint8_t base = 20 + (ring * 8);
+    leds[i] = {base / 2, base, base + beat / 6};
+  }
+
+  int secPos = second;
+  for (int i = 0; i < NUM_LEDS; i++) {
+    int d = abs(i - secPos);
+    d = min(d, NUM_LEDS - d);
+    if (d < 10) {
+      uint8_t boost = (uint8_t)((10 - d) * beat / 10);
+      addPixelWrap(i, boost / 4, boost / 3, boost);
+    }
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 10);
+  applyBrightnessAndShow();
+}
+
+void displayMode_Gradient() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  uint16_t dayHue = (uint32_t)daySeconds * 360 / 86400;
+  uint16_t shift = (millis() / 40) % 360;
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint8_t r, g, b;
+    hsvToRgb((dayHue + shift + i * 5) % 360, 220, 90, r, g, b);
+    leds[i] = {r, g, b};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 12);
+  applyBrightnessAndShow();
+}
+
+void displayMode_Binary() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+
+  uint8_t bits[20];
+  for (int i = 0; i < 20; i++) bits[i] = 0;
+
+  for (int i = 0; i < 6; i++) bits[i] = (hour24 >> i) & 1;
+  bits[6] = 2;
+  for (int i = 0; i < 6; i++) bits[7 + i] = (minute >> i) & 1;
+  bits[13] = 2;
+  for (int i = 0; i < 6; i++) bits[14 + i] = (second >> i) & 1;
+
+  for (int slot = 0; slot < 20; slot++) {
+    for (int j = 0; j < 3; j++) {
+      int idx = slot * 3 + j;
+      if (bits[slot] == 2) {
+        leds[idx] = {15, 15, 15};
+      } else if (slot < 7) {
+        leds[idx] = bits[slot] ? CRGB{220, 60, 60} : CRGB{20, 6, 6};
+      } else if (slot < 14) {
+        leds[idx] = bits[slot] ? CRGB{60, 220, 60} : CRGB{6, 20, 6};
+      } else {
+        leds[idx] = bits[slot] ? CRGB{60, 120, 255} : CRGB{6, 10, 20};
+      }
+    }
+  }
+
+  applyBrightnessAndShow();
+}
+
+void displayMode_HourMarker() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint8_t base = (i <= minute) ? 40 : 12;
+    leds[i] = {base / 4, base, base / 2};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 9);
+  applyBrightnessAndShow();
+}
+
+void displayMode_Strobe() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  uint32_t ms = millis();
+  int flashesPerSec = second + 1;
+  int cycle = max(16, 1000 / flashesPerSec);
+  bool on = (ms % cycle) < (cycle / 3);
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = on ? CRGB{55, 10, 10} : CRGB{12, 4, 4};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 6);
+  applyBrightnessAndShow();
+}
+
+void displayMode_Rainbow() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  uint16_t drift = (millis() / 30) % 360;
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint8_t r, g, b;
+    hsvToRgb((i * 360 / NUM_LEDS + drift) % 360, 255, 80, r, g, b);
+    leds[i] = {r, g, b};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 10);
+  applyBrightnessAndShow();
+}
+
+void displayMode_Flame() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  uint32_t phase = millis() / 20;
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint32_t x = (uint32_t)(i * 37 + phase * 13 + minute * 17);
+    uint8_t flicker = (uint8_t)((x ^ (x >> 3) ^ (x >> 5)) & 0x7F);
+    uint8_t r = 100 + flicker;
+    uint8_t g = 20 + flicker / 2;
+    uint8_t b = 2 + (flicker / 16);
+    leds[i] = {r, g, b};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 11);
+  applyBrightnessAndShow();
+}
+
+void displayClock() {
+  // Dispatcher: choose display mode
+  switch (displayMode) {
+    case DISPLAY_PROGRESS_BAR:
+      displayMode_ProgressBar();
+      break;
+    case DISPLAY_PULSE_DOTS:
+      displayMode_PulseDots();
+      break;
+    case DISPLAY_GRADIENT:
+      displayMode_Gradient();
+      break;
+    case DISPLAY_BINARY:
+      displayMode_Binary();
+      break;
+    case DISPLAY_HOUR_MARKER:
+      displayMode_HourMarker();
+      break;
+    case DISPLAY_STROBE:
+      displayMode_Strobe();
+      break;
+    case DISPLAY_RAINBOW:
+      displayMode_Rainbow();
+      break;
+    case DISPLAY_FLAME:
+      displayMode_Flame();
+      break;
+    case DISPLAY_SOLID:
+    default:
+      displayClock_Solid();
+      break;
+  }
+}
+
+void displayClock_Solid() {
+  int hour12, hour24, minute, second, daySeconds;
+  if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+
+  memset(leds, 0, sizeof(leds));
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint8_t r, g, b;
+    hsvToRgb((i * 6 + second * 6) % 360, 180, 30, r, g, b);
+    leds[i] = {r, g, b};
+  }
+
+  overlayTimeMarkers(hour12, minute, second, 9);
+  applyBrightnessAndShow();
 }
 
 // ============================================================================
@@ -213,6 +499,10 @@ void loadEEPROMSettings() {
                   (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 2) << 8) |
                   (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 3));
   if (tzOff != 0 && tzOff >= -43200 && tzOff <= 43200) tz.utcOffset = tzOff;
+  
+  // Load display mode
+  uint8_t mode = EEPROM.read(EEPROM_DISPLAY_MODE_ADDR);
+  if (mode < DISPLAY_MAX) displayMode = (DisplayMode)mode;
 }
 
 void saveEEPROMSettings(const String& ssid, const String& pass) {
@@ -232,6 +522,7 @@ void saveEEPROMSettings(const String& ssid, const String& pass) {
   EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 1, (tz.utcOffset >> 16) & 0xFF);
   EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 2, (tz.utcOffset >> 8) & 0xFF);
   EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 3, tz.utcOffset & 0xFF);
+  EEPROM.write(EEPROM_DISPLAY_MODE_ADDR, (uint8_t)displayMode);
   
   EEPROM.commit();
   Serial.println("[EEPROM] Saved settings for " + ssid);
@@ -647,6 +938,23 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <div class='status-msg' id='tzMsg'></div>
 </div>
 
+<div class='card'><h2>Display Mode</h2>
+<div class='form-group'><label>LED Display Style</label>
+<select id='displayMode' onchange='saveDisplayMode()' style='width:100%;padding:8px;border:1px solid #ddd;border-radius:4px'>
+<option value='0'>Solid Orbit (H/M/S comet)</option>
+<option value='1'>Day Progress (full-strip timeline)</option>
+<option value='2'>Pulse Wave (second heartbeat)</option>
+<option value='3'>Day Gradient (time-colored sweep)</option>
+<option value='4'>Binary 60 (stretched H/M/S bits)</option>
+<option value='5'>Marker Ring (hour+minute+second)</option>
+<option value='6'>Strobe Clock (tempo by seconds)</option>
+<option value='7'>Rainbow Clock (moving spectrum)</option>
+<option value='8'>Flame Clock (warm dynamic clock)</option>
+</select></div>
+<div style='font-size:11px;color:#888;margin-top:5px' id='modeDesc'>Choose a display mode</div>
+<button class='btn btn-secondary' onclick='updateModeDescription()'>Refresh Display</button>
+</div>
+
 <div class='card'><h2>Brightness</h2>
 <div class='form-group' style='margin-bottom:5px'><label>LED Brightness</label>
 <input type='range' id='brightness' min='10' max='255' value='76' oninput='updateBrightnessLabel()' style='width:100%'/></div>
@@ -716,6 +1024,18 @@ function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:che
 const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
 fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='✓ Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='✗ Error: '+e;b.className='status-msg status-err';});}
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
+function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();}
+function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
+const desc={0:'All 60 LEDs are active. Red=hour marker, green=minute marker, blue=second comet with trail.',
+1:'All 60 LEDs form a day timeline. Filled section shows progress through 24h; H/M/S markers stay visible.',
+2:'All 60 LEDs pulse in waves. Pulse follows seconds while distinct red/green/blue time markers remain.',
+3:'All 60 LEDs show a moving day-color gradient; H/M/S overlays keep exact time readable.',
+4:'All 60 LEDs used as 20 groups × 3 LEDs: hour bits, minute bits, second bits stretched across strip.',
+5:'Ring map mode: minute progress fills the strip, hour is a bold beacon, second is a moving tail.',
+6:'Global strobe tempo follows seconds, but H/M/S markers stay visible on top for readability.',
+7:'Moving rainbow over all 60 LEDs with clear H/M/S markers layered above for instant read.',
+8:'Animated warm flame texture on all 60 LEDs with distinct H/M/S pointers for real clock behavior.'};
+document.getElementById('modeDesc').textContent=desc[m]||'Mode '+m;}
 function pollStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('fwVersion').textContent=d.fw_version_base||'-';
 document.getElementById('fwBuildTime').textContent='('+d.fw_build_time+')';
@@ -730,9 +1050,10 @@ document.getElementById('tzAuto').textContent=d.timezone_auto_detected?'yes':'no
 document.getElementById('tzDetectStatus').textContent=d.tz_detect_status||'-';
 document.getElementById('tzDetectMsg').textContent=d.tz_detect_message||'-';
 document.getElementById('tzDebug').style.display='block';
+if(d.display_mode!==undefined){document.getElementById('displayMode').value=d.display_mode;updateModeDescription();}
 }).catch(e=>console.warn(e));}
 function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
-pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);
+pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);updateModeDescription();
 </script></body></html>
 )html";
 
@@ -779,6 +1100,7 @@ void setupWebServer() {
     doc["tz_detect_last_success_ms"] = tzDiag.lastSuccessMs;
     doc["tz_detect_response_sample"] = tzDiag.responseSample;
     doc["brightness"] = (ledBrightness * 100) / 255;
+    doc["display_mode"] = (int)displayMode;
     doc["ip"] = wifiConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     doc["heap"] = ESP.getFreeHeap();
     String json;
@@ -837,6 +1159,36 @@ void setupWebServer() {
       if (ledStrip) ledStrip->setBrightness(ledBrightness);
     }
     req->send(200, "text/plain", "OK");
+  });
+  
+  // API: Display Mode
+  server.on("/api/display", HTTP_GET, [](AsyncWebServerRequest *req) {
+    DynamicJsonDocument doc(512);
+    doc["current_mode"] = displayMode;
+    doc["available_modes"]["SOLID"] = DISPLAY_SOLID;
+    doc["available_modes"]["PROGRESS_BAR"] = DISPLAY_PROGRESS_BAR;
+    doc["available_modes"]["PULSE_DOTS"] = DISPLAY_PULSE_DOTS;
+    doc["available_modes"]["GRADIENT"] = DISPLAY_GRADIENT;
+    doc["available_modes"]["BINARY"] = DISPLAY_BINARY;
+    doc["available_modes"]["HOUR_MARKER"] = DISPLAY_HOUR_MARKER;
+    doc["available_modes"]["STROBE"] = DISPLAY_STROBE;
+    doc["available_modes"]["RAINBOW"] = DISPLAY_RAINBOW;
+    doc["available_modes"]["FLAME"] = DISPLAY_FLAME;
+    
+    if (req->hasParam("mode")) {
+      int newMode = atoi(req->getParam("mode")->value().c_str());
+      if (newMode >= 0 && newMode < DISPLAY_MAX) {
+        displayMode = (DisplayMode)newMode;
+        doc["changed"] = true;
+        doc["new_mode"] = displayMode;
+      } else {
+        doc["error"] = "Invalid mode";
+      }
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    req->send(200, "application/json", response);
   });
   
   // API: Timezone
