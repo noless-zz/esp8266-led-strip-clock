@@ -1,10 +1,7 @@
 /*
- * ESP8266 WS2812 LED Controller with Captive Portal & OTA
- * --------------------------------------------------------
- * - Captive WiFi hotspot with web UI
- * - WS2812 LED chain control (60 LEDs)
- * - OTA firmware update over WiFi
- * - Multiple LED effects & color control
+ * ESP8266 LED Strip Clock
+ * 60-LED NeoPixel time display with NTP sync and timezone auto-detection
+ * Features: WiFi captive portal, firmware OTA upload, time sync, color blending
  */
 
 #include <Arduino.h>
@@ -16,37 +13,11 @@
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
 #include <Adafruit_NeoPixel.h>
-#include <Updater.h>
 #include <EEPROM.h>
+#include <Updater.h>
+#include <time.h>
+#include <sys/time.h>
 
-// ─── CRGB Compatibility Struct ───────────────────────────
-struct CRGB {
-  uint8_t r, g, b;
-  CRGB() : r(0), g(0), b(0) {}
-  CRGB(uint8_t _r, uint8_t _g, uint8_t _b) : r(_r), g(_g), b(_b) {}
-  void nscale8(uint8_t scale) {
-    r = (uint16_t)r * (uint16_t)scale / 255;
-    g = (uint16_t)g * (uint16_t)scale / 255;
-    b = (uint16_t)b * (uint16_t)scale / 255;
-  }
-  static CRGB Black;
-  static CRGB Red;
-  static CRGB Green;
-  static CRGB Blue;
-  static CRGB White;
-};
-CRGB CRGB::Black = CRGB(0, 0, 0);
-CRGB CRGB::Red = CRGB(255, 0, 0);
-CRGB CRGB::Green = CRGB(0, 255, 0);
-CRGB CRGB::Blue = CRGB(0, 0, 255);
-CRGB CRGB::White = CRGB(255, 255, 255);
-
-// ─── Firmware Version & Build Info ───────────────────────
-#define FW_VERSION "1.0.0"
-#define FW_BUILD_DATE __DATE__
-#define FW_BUILD_TIME __TIME__
-
-// ─── Configuration ───────────────────────────────────────
 #ifndef NUM_LEDS
 #define NUM_LEDS 60
 #endif
@@ -54,1442 +25,403 @@ CRGB CRGB::White = CRGB(255, 255, 255);
 #define LED_PIN D4
 #endif
 
-const char* AP_SSID_BASE = "LED-Controller";
-const char* AP_PASS     = "";          // Open network for captive portal
-const char* OTA_PASS    = "admin123";  // OTA & upload password
-const byte  DNS_PORT    = 53;
-const int   MAX_SCAN_CACHE = 30;
-const unsigned long STA_RETRY_INTERVAL = 180000; // 3 minutes
-const int   OTA_STATUS_LEDS = 5;
-const int   EEPROM_SIZE = 16;
-const int   EEPROM_MAGIC_ADDR = 0;
-const int   EEPROM_POWER_ADDR = 1;
-const int   EEPROM_CRASH_COUNT_ADDR = 2;
+// Build timestamp - compiler generates this automatically
+const char* FW_VERSION_BASE = "2.0.0";
+const char* FW_BUILD_TIME = __DATE__ " " __TIME__;
+const char* AP_SSID = "LED-Clock";
+const char* AP_PASS = "";
+const char* OTA_PASS = "admin123";
+const char* NTP_SERVER = "pool.ntp.org";
+const byte DNS_PORT = 53;
+const int MAX_SCAN_CACHE = 30;
+
+// EEPROM Layout
+const int EEPROM_SIZE = 512;
+const int EEPROM_MAGIC_ADDR = 0;
+const int EEPROM_SSID_ADDR = 1;
+const int EEPROM_PASS_ADDR = 65;
+const int EEPROM_BRIGHTNESS_ADDR = 129;
+const int EEPROM_TZ_OFFSET_ADDR = 130;
 const uint8_t EEPROM_MAGIC = 0xA7;
-const uint8_t SAFE_MODE_CRASH_THRESHOLD = 3;
-const unsigned long SAFE_MODE_CLEAR_UPTIME_MS = 120000;
+const int MAX_SSID_LEN = 32;
+const int MAX_PASS_LEN = 64;
 
-// ─── Globals ─────────────────────────────────────────────
-
-// LED buffer and NeoPixel control
-CRGB leds[NUM_LEDS];
+// Global state - LEDs
 Adafruit_NeoPixel *ledStrip = nullptr;
-uint8_t neoBrightness = 255;
+uint8_t ledBrightness = 76;  // 30%
+struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
 
-// NeoPixel show buffer - syncs CRGB array to NeoPixel hardware
-void neopixelShowBuffer(int count) {
-  if (!ledStrip || !leds) return;
-  for (int i = 0; i < count; i++) {
-    ledStrip->setPixelColor(i, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b));
-  }
-  ledStrip->show();
-}
-
-// FastLED compatibility wrapper
-class NeoFastLEDCompat {
-public:
-  void clear(bool writeNow = false) {
-    for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB::Black;
-    if (writeNow && ledStrip) {
-      ledStrip->clear();
-      ledStrip->show();
-    }
-  }
-  void show() {
-    neopixelShowBuffer(NUM_LEDS);
-  }
-  void setBrightness(uint8_t b) {
-    neoBrightness = b;
-    if (ledStrip) ledStrip->setBrightness(b);
-  }
-  void setMaxPowerInVoltsAndMilliamps(uint8_t, uint16_t) {}
-  void addLeds(Adafruit_NeoPixel* strip) {
-    ledStrip = strip;
-  }
-} FastLED;
-
-// Forward declarations for FastLED helper functions
-void fill_solid(CRGB* leds, int count, CRGB color);
-CRGB blend(const CRGB& a, const CRGB& b, uint8_t amount);
-uint8_t beatsin8(uint16_t bpm, uint8_t min_val, uint8_t max_val);
-uint16_t beatsin16(uint16_t bpm, uint16_t min_val, uint16_t max_val);
-uint8_t qsub8(uint8_t a, uint8_t b);
-uint8_t qadd8(uint8_t a, uint8_t b);
-uint8_t random8(uint8_t min, uint8_t max);
-uint8_t random8();
-uint8_t random8(uint8_t max);
-uint16_t random16(uint16_t min, uint16_t max);
-uint16_t random16(uint16_t max);
-uint8_t sin8(uint8_t phase);
-CRGB HeatColor(uint8_t Temperature);
-void fill_rainbow(CRGB* leds, int count, uint8_t startHue, uint8_t deltaHue);
-void fill_gradient_RGB(CRGB* leds, int startIdx, CRGB startColor, int endIdx, CRGB endColor);
-void fadeToBlackBy(CRGB* leds, int count, uint8_t amount);
-CRGB hsvToRgb(uint8_t h, uint8_t s, uint8_t v);
-
-// Helper function: fill array with solid color
-void fill_solid(CRGB* leds, int count, CRGB color) {
-  for (int i = 0; i < count; i++) {
-    leds[i] = color;
-  }
-}
-
-// Helper function: scale brightness
-uint8_t nscale8(uint8_t val, uint8_t scale) {
-  return (uint16_t)val * (uint16_t)scale / 255;
-}
-
-// FastLED math helpers
-uint8_t qsub8(uint8_t a, uint8_t b) {
-  return (a > b) ? (a - b) : 0;
-}
-
-uint8_t qadd8(uint8_t a, uint8_t b) {
-  uint16_t sum = (uint16_t)a + (uint16_t)b;
-  return (sum > 255) ? 255 : (uint8_t)sum;
-}
-
-uint8_t random8(uint8_t min, uint8_t max) {
-  return min + (uint16_t)random(max - min);
-}
-
-uint8_t random8() {
-  return random(256);
-}
-
-uint8_t random8(uint8_t max) {
-  return random(max);
-}
-
-uint16_t random16(uint16_t min, uint16_t max) {
-  return min + random(max - min);
-}
-
-// Overload for single argument - treats it as max value (0 to max)
-uint16_t random16(uint16_t max) {
-  return random(max);
-}
-
-// Sine wave (0-255 phase range)
-uint8_t sin8(uint8_t phase) {
-  return (uint8_t)((1.0 + sin(phase * 3.14159 / 128.0)) * 127.5);
-}
-
-// Beat sine with BPM
-uint16_t beatsin16(uint16_t bpm, uint16_t min_val, uint16_t max_val) {
-  uint32_t beatVal = (millis() * bpm / 60000) % 256;
-  uint16_t val = sin8(beatVal);
-  return min_val + ((uint32_t)val * (max_val - min_val) / 255);
-}
-
-uint8_t beatsin8(uint16_t bpm, uint8_t min_val, uint8_t max_val) {
-  return (uint8_t)beatsin16(bpm, min_val, max_val);
-}
-
-// HSV to RGB conversion
-CRGB hsvToRgb(uint8_t h, uint8_t s, uint8_t v) {
-  uint8_t region = h / 43;
-  uint8_t remainder = (h % 43) * 6;
-  uint8_t p = (v * (255 - s)) / 255;
-  uint8_t q = (v * (255 - ((s * remainder) / 256))) / 255;
-  uint8_t t = (v * (255 - ((s * (256 - remainder)) / 256))) / 255;
-  
-  switch (region) {
-    case 0: return CRGB(v, t, p);
-    case 1: return CRGB(q, v, p);
-    case 2: return CRGB(p, v, t);
-    case 3: return CRGB(p, q, v);
-    case 4: return CRGB(t, p, v);
-    default: return CRGB(v, p, q);
-  }
-}
-
-// Heat color (for fire effect)
-CRGB HeatColor(uint8_t Temperature) {
-  if (Temperature < 85) {
-    return CRGB(Temperature * 3, 0, 0);
-  } else if (Temperature < 170) {
-    return CRGB(255, (Temperature - 85) * 3, 0);
-  } else {
-    return CRGB(255, 255, (Temperature - 170) * 3);
-  }
-}
-
-// Fill with rainbow gradient
-void fill_rainbow(CRGB* leds, int count, uint8_t startHue, uint8_t deltaHue) {
-  for (int i = 0; i < count; i++) {
-    leds[i] = hsvToRgb(startHue + (i * deltaHue), 255, 255);
-  }
-}
-
-// Fill RGB gradient
-void fill_gradient_RGB(CRGB* leds, int startIdx, CRGB startColor, int endIdx, CRGB endColor) {
-  int range = endIdx - startIdx;
-  for (int i = startIdx; i <= endIdx; i++) {
-    uint8_t weight = (i - startIdx) * 255 / range;
-    leds[i] = blend(startColor, endColor, weight);
-  }
-}
-
-// Fade to black
-void fadeToBlackBy(CRGB* leds, int count, uint8_t amount) {
-  for (int i = 0; i < count; i++) {
-    leds[i].r = qsub8(leds[i].r, amount);
-    leds[i].g = qsub8(leds[i].g, amount);
-    leds[i].b = qsub8(leds[i].b, amount);
-  }
-}
-
-// Blend two colors
-CRGB blend(const CRGB& a, const CRGB& b, uint8_t amount) {
-  uint16_t inv = 255 - amount;
-  return CRGB(
-    (uint8_t)(((uint16_t)a.r * inv + (uint16_t)b.r * amount) / 255),
-    (uint8_t)(((uint16_t)a.g * inv + (uint16_t)b.g * amount) / 255),
-    (uint8_t)(((uint16_t)a.b * inv + (uint16_t)b.b * amount) / 255)
-  );
-}
-
+// Web server
 AsyncWebServer server(80);
 DNSServer dnsServer;
-String deviceId;
-String apSsid;
-String localHostname;
 bool mdnsStarted = false;
-bool otaVisualActive = false;
-bool safeModeActive = false;
-uint8_t bootCrashCount = 0;
-String lastResetReason;
-unsigned long bootStartedAt = 0;
-bool crashCounterCleared = false;
 
-uint32_t loopLatencyUs = 0;
-uint32_t loopLatencyMaxUs = 0;
-unsigned long loopLastMicros = 0;
-unsigned long heapWindowStartedAt = 0;
-uint32_t heapWindowStart = 0;
-uint32_t heapWindowMin = 0;
-uint32_t heapWindowMax = 0;
-int32_t heapTrendDelta = 0;
-unsigned long lastHeapSampleAt = 0;
-bool wifiWasConnected = false;
-bool wifiEverConnected = false;
-uint32_t wifiReconnectCount = 0;
-
+// WiFi state
 struct ScanCacheEntry {
   String ssid;
   int32_t rssi = 0;
   int channel = -1;
   int enc = -1;
   bool hasBssid = false;
-  uint8_t bssid[6] = {0};
 };
 ScanCacheEntry scanCache[MAX_SCAN_CACHE];
 int scanCacheCount = 0;
 unsigned long scanCacheUpdatedAt = 0;
 
-// Periodic STA retry & session tracking
-unsigned long lastStaRetryAt = 0;
-unsigned long lastClientActivity = 0;
-int activeClientCount = 0;
+struct {
+  bool active = false;
+  bool connecting = false;
+  bool success = false;
+  String attemptedSsid;
+  String error = "";
+  unsigned long startedAt = 0;
+  wl_status_t lastStatus = WL_DISCONNECTED;
+} wifiConnect;
 
-struct OtaStatusState {
+bool wifiConnected = false;
+unsigned long lastNtpSync = 0, lastTzCheck = 0;
+struct { int32_t utcOffset; String name; bool autoDetected; } tz = {0, "UTC", true};
+struct {
+  String source = "ip-api.com";
+  String status = "idle";
+  String message = "not started";
+  String responseSample = "";
+  int httpCode = 0;
+  unsigned long lastAttemptMs = 0;
+  unsigned long lastSuccessMs = 0;
+} tzDiag;
+
+// OTA state
+struct {
   bool inProgress = false;
   bool approved = false;
   bool lastSuccess = false;
   uint8_t lastErrorCode = 0;
-  String lastErrorText;
-  String lastFileName;
-  size_t expectedBytes = 0;
-  size_t writtenBytes = 0;
+  String lastErrorText = "";
+  String lastFileName = "";
+  uint32_t expectedBytes = 0;
+  uint32_t writtenBytes = 0;
   unsigned long startedAt = 0;
   unsigned long finishedAt = 0;
 } otaStatus;
 
-struct OtaDebugTrace {
-  bool active = false;
-  bool pendingInit = false;
-  bool pendingFinal = false;
-  bool pendingError = false;
+// ============================================================================
+// LED Functions
+// ============================================================================
 
-  uint32_t cbCount = 0;
-  uint32_t chunkCount = 0;
-  uint32_t totalBytes = 0;
-  uint32_t expectedBytes = 0;
-
-  uint32_t lastIdx = 0;
-  uint32_t lastLen = 0;
-  uint32_t lastOffset = 0;
-  uint32_t lastReqChunk = 0;
-  uint32_t lastWrote = 0;
-  uint32_t lastDtUs = 0;
-  uint32_t maxDtUs = 0;
-  uint32_t lastHeap = 0;
-  uint32_t initHeap = 0;
-  uint32_t maxUpdateSize = 0;
-
-  uint8_t lastErr = 0;
-  bool finalOk = false;
-  uint32_t finalDtMs = 0;
-} otaDbg;
-
-struct WifiConnectState {
-  bool active = false;
-  bool resultReady = false;
-  bool success = false;
-  String error;
-  unsigned long startedAt = 0;
-  unsigned long timeoutMs = 15000;
-  bool reportResult = true;
-  String attemptedSsid;
-  uint8_t passLen = 0;
-  wl_status_t lastStatus = WL_IDLE_STATUS;
-  bool targetSeenInScan = false;
-  int targetChannel = -1;
-  int32_t targetRssi = 0;
-  int targetEnc = -1;
-  bool targetHasBssid = false;
-  uint8_t targetBssid[6] = {0};
-  unsigned long lastElapsedMs = 0;
-} wifiConnect;
-
-bool beginWiFiConnectAttempt(unsigned long timeoutMs, bool reportResult) {
-  if (wifiConnect.active) {
-    return false;
-  }
-
-  wifiConnect.active = true;
-  wifiConnect.resultReady = false;
-  wifiConnect.success = false;
-  wifiConnect.error = "";
-  wifiConnect.startedAt = millis();
-  wifiConnect.timeoutMs = timeoutMs;
-  wifiConnect.reportResult = reportResult;
-  return true;
-}
-
-// LED State
-struct LedState {
-  bool     power       = true;
-  uint8_t  brightness  = 128;
-  uint8_t  effect      = 0;   // 0=solid,1=rainbow,2=chase,3=breathe,4=fire,5=twinkle,6=wave,7=gradient
-  CRGB     color1      = CRGB(255, 0, 80);
-  CRGB     color2      = CRGB(0, 120, 255);
-  uint8_t  speed       = 128;
-} state;
-
-uint8_t effectHue = 0;
-unsigned long lastUpdate = 0;
-
-// ─── Forward Declarations ────────────────────────────────
-void setupWiFi();
-void setupDNS();
-void setupMDNS();
-void setupOTA();
-void setupWebServer();
-void flushOtaDebugLogs();
-void setupLEDs();
-void updateLEDs();
-void effectSolid();
-void effectRainbow();
-void effectChase();
-void effectBreathe();
-void effectFire();
-void effectTwinkle();
-void effectWave();
-void effectGradient();
-String getStatusJson();
-String getWifiScanJson();
-void buildDeviceIdentity();
-bool startWiFiConnect(const String& ssid, const String& pass);
-void updateWiFiConnect();
-void checkPeriodicStaRetry();
-void ensureApFallback();
-void trackClientActivity();
-const char* wifiStatusToString(wl_status_t status);
-const char* wifiEncryptionToString(int enc);
-String buildWifiFailureHint();
-String getCaptivePortalUrl();
-void loadLedPowerState();
-void saveLedPowerState();
-void evaluateSafeModeOnBoot();
-bool isCrashResetReason(const String& reason);
-void applySafeModeDefaults();
-void maybeClearCrashCounterAfterStableUptime();
-void updateTelemetry();
-uint32_t getMaxUpdateSize();
-const char* updateErrorToString(uint8_t error);
-String getOtaStatusJson();
-
-// ─── HTML Page (embedded) ────────────────────────────────
-const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>LED Controller</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&display=swap');
-  :root {
-    --bg: #0a0a0f;
-    --card: #12121a;
-    --border: #1e1e2e;
-    --text: #e0e0e8;
-    --dim: #6a6a7a;
-    --accent: #ff0050;
-    --accent2: #0078ff;
-    --glow: rgba(255,0,80,0.3);
-  }
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    font-family: 'JetBrains Mono', monospace;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    padding: 16px;
-    -webkit-font-smoothing: antialiased;
-  }
-  .container { max-width: 420px; margin: 0 auto; }
-  h1 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    text-align: center;
-    margin-bottom: 20px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 12px;
-  }
-  .card-title {
-    font-size: 0.65rem;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    color: var(--dim);
-    margin-bottom: 12px;
-  }
-  .power-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .led-preview {
-    height: 6px;
-    border-radius: 3px;
-    background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent));
-    background-size: 200% 100%;
-    animation: shimmer 3s ease infinite;
-    margin-bottom: 16px;
-    opacity: 0.8;
-  }
-  @keyframes shimmer { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
-  .toggle {
-    width: 48px; height: 26px;
-    background: #2a2a3a;
-    border-radius: 13px;
-    position: relative;
-    cursor: pointer;
-    transition: background 0.3s;
-  }
-  .toggle.on { background: var(--accent); box-shadow: 0 0 12px var(--glow); }
-  .toggle::after {
-    content: '';
-    width: 20px; height: 20px;
-    background: #fff;
-    border-radius: 50%;
-    position: absolute;
-    top: 3px; left: 3px;
-    transition: transform 0.3s;
-  }
-  .toggle.on::after { transform: translateX(22px); }
-  .slider-group { margin-bottom: 14px; }
-  .slider-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.7rem;
-    color: var(--dim);
-    margin-bottom: 6px;
-  }
-  input[type=range] {
-    -webkit-appearance: none;
-    width: 100%;
-    height: 4px;
-    border-radius: 2px;
-    background: #2a2a3a;
-    outline: none;
-  }
-  input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 18px; height: 18px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    box-shadow: 0 0 8px var(--glow);
-  }
-  .color-row {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
-  .color-pick {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-  }
-  .color-pick label { font-size: 0.6rem; color: var(--dim); letter-spacing: 1px; }
-  input[type=color] {
-    -webkit-appearance: none;
-    width: 100%; height: 36px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: transparent;
-    cursor: pointer;
-    padding: 2px;
-  }
-  input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
-  input[type=color]::-webkit-color-swatch { border: none; border-radius: 6px; }
-  .effects-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
-  }
-  .fx-btn {
-    padding: 8px 4px;
-    font-family: inherit;
-    font-size: 0.6rem;
-    letter-spacing: 0.5px;
-    background: #1a1a2a;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--dim);
-    cursor: pointer;
-    transition: all 0.2s;
-    text-align: center;
-  }
-  .fx-btn:hover { border-color: var(--accent); color: var(--text); }
-  .fx-btn.active {
-    background: linear-gradient(135deg, rgba(255,0,80,0.15), rgba(0,120,255,0.15));
-    border-color: var(--accent);
-    color: #fff;
-    box-shadow: 0 0 8px var(--glow);
-  }
-  .upload-area {
-    border: 1px dashed var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color 0.3s;
-  }
-  .upload-area:hover { border-color: var(--accent); }
-  .upload-area p { font-size: 0.7rem; color: var(--dim); }
-  .upload-btn {
-    display: inline-block;
-    margin-top: 10px;
-    padding: 8px 20px;
-    font-family: inherit;
-    font-size: 0.7rem;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    letter-spacing: 1px;
-  }
-  .upload-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .progress-bar {
-    width: 100%;
-    height: 4px;
-    background: #2a2a3a;
-    border-radius: 2px;
-    margin-top: 10px;
-    display: none;
-  }
-  .progress-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 2px;
-    width: 0%;
-    transition: width 0.3s;
-  }
-  .status-msg {
-    font-size: 0.65rem;
-    margin-top: 8px;
-    text-align: center;
-    min-height: 1em;
-  }
-  .status-ok { color: #4caf50; }
-  .status-err { color: #ff4444; }
-  .info-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.6rem;
-    color: var(--dim);
-    padding: 4px 0;
-  }
-  .wifi-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  select, input[type=password] {
-    width: 100%;
-    background: #1a1a2a;
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px;
-    font-family: inherit;
-    font-size: 0.7rem;
-  }
-  .mini-btn {
-    padding: 8px 10px;
-    font-family: inherit;
-    font-size: 0.65rem;
-    background: #1a1a2a;
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .mini-btn:hover { border-color: var(--accent); }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>&#9670; LED Controller</h1>
-  <div class="led-preview" id="preview"></div>
-
-  <!-- Power & Brightness -->
-  <div class="card">
-    <div class="power-row">
-      <span class="card-title" style="margin:0">POWER</span>
-      <div class="toggle on" id="powerToggle" onclick="togglePower()"></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">BRIGHTNESS</div>
-    <div class="slider-group">
-      <div class="slider-label"><span>Dim</span><span id="brVal">128</span><span>Full</span></div>
-      <input type="range" id="brightness" min="0" max="255" value="128" oninput="sendSlider('brightness',this.value)">
-    </div>
-    <div class="card-title" style="margin-top:8px">SPEED</div>
-    <div class="slider-group">
-      <div class="slider-label"><span>Slow</span><span id="spVal">128</span><span>Fast</span></div>
-      <input type="range" id="speed" min="1" max="255" value="128" oninput="sendSlider('speed',this.value)">
-    </div>
-  </div>
-
-  <!-- Colors -->
-  <div class="card">
-    <div class="card-title">COLORS</div>
-    <div class="color-row">
-      <div class="color-pick">
-        <label>PRIMARY</label>
-        <input type="color" id="color1" value="#ff0050" onchange="sendColor()">
-      </div>
-      <div class="color-pick">
-        <label>SECONDARY</label>
-        <input type="color" id="color2" value="#0078ff" onchange="sendColor()">
-      </div>
-    </div>
-  </div>
-
-  <!-- Effects -->
-  <div class="card">
-    <div class="card-title">EFFECTS</div>
-    <div class="effects-grid" id="fxGrid">
-      <button class="fx-btn active" onclick="setEffect(0)">Solid</button>
-      <button class="fx-btn" onclick="setEffect(1)">Rainbow</button>
-      <button class="fx-btn" onclick="setEffect(2)">Chase</button>
-      <button class="fx-btn" onclick="setEffect(3)">Breathe</button>
-      <button class="fx-btn" onclick="setEffect(4)">Fire</button>
-      <button class="fx-btn" onclick="setEffect(5)">Twinkle</button>
-      <button class="fx-btn" onclick="setEffect(6)">Wave</button>
-      <button class="fx-btn" onclick="setEffect(7)">Gradient</button>
-    </div>
-  </div>
-
-  <!-- WiFi Setup -->
-  <div class="card">
-    <div class="card-title">WIFI SETUP</div>
-    <div class="wifi-row" style="margin-bottom:8px">
-      <select id="ssidList"></select>
-      <button class="mini-btn" onclick="scanWifi()">SCAN</button>
-    </div>
-    <div class="wifi-row">
-      <input type="password" id="wifiPass" placeholder="WiFi password">
-      <button class="mini-btn" onclick="connectWifi()">CONNECT</button>
-    </div>
-    <div class="status-msg" id="wifiMsg"></div>
-  </div>
-
-  <!-- OTA Update -->
-  <div class="card">
-    <div class="card-title">FIRMWARE UPDATE</div>
-    <div class="upload-area" onclick="document.getElementById('fwFile').click()">
-      <p id="fileName">Select .bin firmware file</p>
-      <input type="file" id="fwFile" accept=".bin" style="display:none" onchange="fileSelected(this)">
-    </div>
-    <button class="upload-btn" id="uploadBtn" onclick="uploadFirmware()" disabled>UPLOAD</button>
-    <div class="progress-bar" id="progBar"><div class="progress-fill" id="progFill"></div></div>
-    <div class="status-msg" id="statusMsg"></div>
-  </div>
-
-  <!-- Info -->
-  <div class="card">
-    <div class="card-title">DEVICE INFO</div>
-    <div class="info-row"><span>Firmware</span><span id="fwVersion">-</span></div>
-    <div class="info-row"><span>LEDs</span><span id="ledCount">-</span></div>
-    <div class="info-row"><span>AP SSID</span><span id="apSsid">-</span></div>
-    <div class="info-row"><span>Host</span><span id="host">-</span></div>
-    <div class="info-row"><span>IP</span><span id="ip">-</span></div>
-    <div class="info-row"><span>Heap</span><span id="heap">-</span></div>
-  </div>
-
-  <!-- Connection Stats -->
-  <div class="card" id="staCard" style="display:none">
-    <div class="card-title">WIFI CONNECTION</div>
-    <div class="info-row"><span>SSID</span><span id="staSsid">-</span></div>
-    <div class="info-row"><span>Signal</span><span id="staSignal">-</span></div>
-    <div class="info-row"><span>Quality</span><span id="staQuality">-</span></div>
-    <div class="info-row"><span>Channel</span><span id="staChannel">-</span></div>
-    <div class="info-row"><span>BSSID</span><span id="staBssid">-</span></div>
-  </div>
-
-  <!-- Telemetry -->
-  <div class="card">
-    <div class="card-title">TELEMETRY</div>
-    <div class="info-row"><span>Mode</span><span id="safeMode">-</span></div>
-    <div class="info-row"><span>Reset</span><span id="resetReason">-</span></div>
-    <div class="info-row"><span>Crash Count</span><span id="crashCount">-</span></div>
-    <div class="info-row"><span>Loop (us)</span><span id="loopLatency">-</span></div>
-    <div class="info-row"><span>Heap Trend</span><span id="heapTrend">-</span></div>
-    <div class="info-row"><span>WiFi Reconnects</span><span id="wifiReconn">-</span></div>
-  </div>
-</div>
-
-<script>
-const API = '';
-let debounce = null;
-let fwPrecheckOk = false;
-let fwPrecheckSummary = '';
-const OTA_REBOOT_KEY = 'otaRebootPending';
-
-function saveOtaRebootState(meta = {}) {
-  try {
-    localStorage.setItem(OTA_REBOOT_KEY, JSON.stringify({
-      at: Date.now(),
-      ...meta
-    }));
-  } catch (_) {}
-}
-
-function readOtaRebootState() {
-  try {
-    const raw = localStorage.getItem(OTA_REBOOT_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (_) {
-    return null;
-  }
-}
-
-function clearOtaRebootState() {
-  try { localStorage.removeItem(OTA_REBOOT_KEY); } catch (_) {}
-}
-
-function waitForDeviceAfterUpdate() {
-  const statusMsg = document.getElementById('statusMsg');
-  const uploadBtn = document.getElementById('uploadBtn');
-  const startedAt = Date.now();
-
-  statusMsg.textContent = 'Firmware uploaded. Reconnecting after reboot...';
-  statusMsg.className = 'status-msg';
-  uploadBtn.disabled = true;
-
-  const tryReconnect = () => {
-    fetch('/api/status?ts=' + Date.now(), { cache: 'no-store' })
-      .then(r => {
-        if (!r.ok) throw new Error('status not ready');
-        return r.json();
-      })
-      .then(d => {
-        const last = readOtaRebootState();
-        clearOtaRebootState();
-        const bytes = (d.ota_status && d.ota_status.written_bytes) ? d.ota_status.written_bytes : ((last && last.written) ? last.written : 0);
-        statusMsg.textContent = `Update successful (${bytes} bytes). Device reconnected at ${d.ip || 'online'}.`;
-        statusMsg.className = 'status-msg status-ok';
-        uploadBtn.disabled = false;
-        pollStatus();
-      })
-      .catch(() => {
-        if (Date.now() - startedAt > 90000) {
-          statusMsg.textContent = 'Device is still rebooting. Refresh in a few seconds.';
-          statusMsg.className = 'status-msg status-err';
-          uploadBtn.disabled = false;
-          return;
-        }
-        setTimeout(tryReconnect, 1500);
-      });
-  };
-
-  setTimeout(tryReconnect, 800);
-}
-
-function send(url) {
-  fetch(API + url).catch(e => console.warn(e));
-}
-
-function togglePower() {
-  const t = document.getElementById('powerToggle');
-  t.classList.toggle('on');
-  send('/api/power?on=' + (t.classList.contains('on') ? '1' : '0'));
-}
-
-function sendSlider(param, val) {
-  document.getElementById(param === 'brightness' ? 'brVal' : 'spVal').textContent = val;
-  clearTimeout(debounce);
-  debounce = setTimeout(() => send('/api/' + param + '?value=' + val), 50);
-}
-
-function sendColor() {
-  const c1 = document.getElementById('color1').value;
-  const c2 = document.getElementById('color2').value;
-  send('/api/color?c1=' + encodeURIComponent(c1) + '&c2=' + encodeURIComponent(c2));
-}
-
-function setEffect(idx) {
-  document.querySelectorAll('.fx-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
-  send('/api/effect?id=' + idx);
-}
-
-function fileSelected(input) {
-  const uploadBtn = document.getElementById('uploadBtn');
-  const statusMsg = document.getElementById('statusMsg');
-  fwPrecheckOk = false;
-  fwPrecheckSummary = '';
-  uploadBtn.disabled = true;
-
-  if (input.files.length === 0) return;
-
-  const file = input.files[0];
-  document.getElementById('fileName').textContent = file.name;
-  statusMsg.textContent = 'Checking firmware...';
-  statusMsg.className = 'status-msg';
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    const bytes = new Uint8Array(reader.result);
-    const magic = bytes.length > 0 ? bytes[0] : 0;
-    fetch(`/api/update/precheck?name=${encodeURIComponent(file.name)}&size=${file.size}&magic=${magic}`)
-      .then(r => r.json())
-      .then(d => {
-        fwPrecheckOk = !!d.ok;
-        fwPrecheckSummary = d.summary || '';
-        if (d.ok) {
-          uploadBtn.disabled = false;
-          statusMsg.textContent = `Precheck OK: ${d.summary}`;
-          statusMsg.className = 'status-msg status-ok';
-        } else {
-          uploadBtn.disabled = true;
-          statusMsg.textContent = `Precheck failed: ${d.error || 'Invalid firmware file'}`;
-          statusMsg.className = 'status-msg status-err';
-        }
-      })
-      .catch(() => {
-        uploadBtn.disabled = true;
-        statusMsg.textContent = 'Precheck request failed';
-        statusMsg.className = 'status-msg status-err';
-      });
-  };
-  reader.onerror = () => {
-    uploadBtn.disabled = true;
-    statusMsg.textContent = 'Failed to read firmware file';
-    statusMsg.className = 'status-msg status-err';
-  };
-  reader.readAsArrayBuffer(file.slice(0, 1));
-}
-
-function uploadFirmware() {
-  const file = document.getElementById('fwFile').files[0];
-  if (!file) return;
-  const statusMsg = document.getElementById('statusMsg');
-  if (!fwPrecheckOk) {
-    statusMsg.textContent = 'Run precheck first (re-select firmware file)';
-    statusMsg.className = 'status-msg status-err';
-    return;
-  }
-  if (!confirm(`Approve firmware upload?\n\n${fwPrecheckSummary}`)) {
-    return;
-  }
-
-  const formData = new FormData();
-  formData.append('firmware', file);
-  const xhr = new XMLHttpRequest();
-  const progBar = document.getElementById('progBar');
-  const progFill = document.getElementById('progFill');
-  progBar.style.display = 'block';
-  statusMsg.textContent = '';
-  statusMsg.className = 'status-msg';
-  document.getElementById('uploadBtn').disabled = true;
-
-  xhr.upload.addEventListener('progress', (e) => {
-    if (e.lengthComputable) progFill.style.width = (e.loaded / e.total * 100) + '%';
-  });
-  xhr.addEventListener('load', () => {
-    let payload = null;
-    try { payload = JSON.parse(xhr.responseText); } catch (_) {}
-    if (xhr.status === 200 && payload && payload.ok) {
-      const writtenBytes = (payload.written && payload.written > 0) ? payload.written : file.size;
-      saveOtaRebootState({
-        written: writtenBytes,
-        expected: payload.expected || 0,
-        file: file.name
-      });
-      statusMsg.textContent = `Update OK (${writtenBytes} bytes). Rebooting...`;
-      statusMsg.className = 'status-msg status-ok';
-      setTimeout(() => location.reload(), 1200);
-      return;
-    }
-
-    const err = payload && payload.error ? payload.error : xhr.responseText;
-    statusMsg.textContent = `Upload failed: ${err}`;
-    statusMsg.className = 'status-msg status-err';
-    document.getElementById('uploadBtn').disabled = false;
-  });
-  xhr.addEventListener('error', () => {
-    // During successful OTA, connection can drop when device restarts.
-    saveOtaRebootState({ file: file.name });
-    waitForDeviceAfterUpdate();
-  });
-  xhr.open('POST', '/api/update?approve=1');
-  xhr.send(formData);
-}
-
-function scanWifi(attempt = 0) {
-  const list = document.getElementById('ssidList');
-  const msg = document.getElementById('wifiMsg');
-  if (attempt === 0) {
-    msg.textContent = 'Scanning...';
-    msg.className = 'status-msg';
-  }
-  fetch('/api/wifi/scan').then(r => r.json()).then(d => {
-    if (d.scanning) {
-      if (attempt > 25) {
-        msg.textContent = 'Scan timeout';
-        msg.className = 'status-msg status-err';
-        return;
-      }
-      setTimeout(() => scanWifi(attempt + 1), 350);
-      return;
-    }
-
-    list.innerHTML = '';
-    if (!d.networks || d.networks.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = 'No networks found';
-      list.appendChild(opt);
-      msg.textContent = 'No SSIDs detected';
-      return;
-    }
-    d.networks.forEach(n => {
-      const opt = document.createElement('option');
-      opt.value = n.ssid;
-      opt.textContent = `${n.ssid} (${n.rssi} dBm)`;
-      list.appendChild(opt);
-    });
-    msg.textContent = `Found ${d.networks.length} networks`;
-    msg.className = 'status-msg status-ok';
-  }).catch(() => {
-    msg.textContent = 'Scan failed';
-    msg.className = 'status-msg status-err';
-  });
-}
-
-function connectWifi() {
-  const ssid = document.getElementById('ssidList').value;
-  const pass = document.getElementById('wifiPass').value;
-  const msg = document.getElementById('wifiMsg');
-  if (!ssid) {
-    msg.textContent = 'Select an SSID first';
-    msg.className = 'status-msg status-err';
-    return;
-  }
-  msg.textContent = `Connecting to ${ssid}...`;
-  msg.className = 'status-msg';
-
-  const pollConnect = (attempt = 0) => {
-    fetch('/api/wifi/connect').then(r => r.json()).then(d => {
-      if (d.connecting) {
-        if (attempt > 60) {
-          msg.textContent = 'Connection timeout';
-          msg.className = 'status-msg status-err';
-          return;
-        }
-        setTimeout(() => pollConnect(attempt + 1), 500);
-        return;
-      }
-
-      if (d.connected) {
-        msg.textContent = `Connected! Open http://${d.hostname}.local/ or ${d.ip}`;
-        msg.className = 'status-msg status-ok';
-      } else {
-        msg.textContent = d.error || 'Connection failed';
-        msg.className = 'status-msg status-err';
-      }
-      pollStatus();
-    }).catch(() => {
-      msg.textContent = 'Connection status check failed';
-      msg.className = 'status-msg status-err';
-    });
-  };
-
-  const p = new URLSearchParams({ ssid, pass });
-  fetch('/api/wifi/connect?' + p.toString()).then(r => r.json()).then(d => {
-    if (!d.connecting) {
-      msg.textContent = d.error || 'Failed to start connection';
-      msg.className = 'status-msg status-err';
-      return;
-    }
-    pollConnect();
-  }).catch(() => {
-    msg.textContent = 'Connection request failed';
-    msg.className = 'status-msg status-err';
-  });
-}
-
-// Poll status
-function pollStatus() {
-  fetch('/api/status').then(r => r.json()).then(d => {
-    document.getElementById('fwVersion').textContent = d.fw_version || '-';
-    document.getElementById('ledCount').textContent = (typeof d.num_leds !== 'undefined') ? d.num_leds : '-';
-    document.getElementById('heap').textContent = Math.round(d.heap / 1024) + ' KB';
-    document.getElementById('apSsid').textContent = d.ap_ssid || '-';
-    document.getElementById('host').textContent = d.hostname ? (d.hostname + '.local') : '-';
-    document.getElementById('ip').textContent = d.ip || '-';
-    document.getElementById('powerToggle').classList.toggle('on', d.power);
-    document.getElementById('brightness').value = d.brightness;
-    document.getElementById('brVal').textContent = d.brightness;
-    document.getElementById('speed').value = d.speed;
-    document.getElementById('spVal').textContent = d.speed;
-    document.querySelectorAll('.fx-btn').forEach((b, i) => b.classList.toggle('active', i === d.effect));
-    
-    // Update connection stats
-    const staCard = document.getElementById('staCard');
-    if (d.connected && d.sta_ssid) {
-      staCard.style.display = 'block';
-      document.getElementById('staSsid').textContent = d.sta_ssid;
-      document.getElementById('staSignal').textContent = d.sta_rssi + ' dBm';
-      document.getElementById('staQuality').textContent = d.sta_quality;
-      document.getElementById('staChannel').textContent = d.sta_channel;
-      document.getElementById('staBssid').textContent = d.sta_bssid;
-    } else {
-      staCard.style.display = 'none';
-    }
-
-    document.getElementById('safeMode').textContent = d.safe_mode ? 'SAFE (AP-only)' : 'NORMAL';
-    document.getElementById('resetReason').textContent = d.reset_reason || '-';
-    document.getElementById('crashCount').textContent = (d.crash_count ?? 0).toString();
-    document.getElementById('loopLatency').textContent = `${d.loop_latency_us || 0} / max ${d.loop_latency_max_us || 0}`;
-    const trend = d.heap_trend_delta || 0;
-    const trendSign = trend > 0 ? '+' : '';
-    document.getElementById('heapTrend').textContent = `${trendSign}${trend} (min ${d.heap_trend_min || 0}, max ${d.heap_trend_max || 0})`;
-    document.getElementById('wifiReconn').textContent = (d.wifi_reconnects ?? 0).toString();
-  }).catch(() => {});
-}
-pollStatus();
-scanWifi();
-if (readOtaRebootState()) {
-  waitForDeviceAfterUpdate();
-}
-setInterval(pollStatus, 5000);
-</script>
-</body>
-</html>
-)rawliteral";
-
-// ─── Setup ───────────────────────────────────────────────
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\n\n=== LED Controller Starting ===");
-  Serial.printf("FW Version: %s (built %s at %s)\n", FW_VERSION, FW_BUILD_DATE, FW_BUILD_TIME);
-  bootStartedAt = millis();
-  evaluateSafeModeOnBoot();
-
-  buildDeviceIdentity();
-  setupLEDs();
-  loadLedPowerState();
-  if (safeModeActive) {
-    applySafeModeDefaults();
-  }
-  setupWiFi();
-  setupDNS();
-  setupMDNS();
-  setupOTA();
-  setupWebServer();
-
-  Serial.println("=== Ready! AP: " + apSsid + " / Host: " + localHostname + ".local ===");
-}
-
-void loop() {
-  dnsServer.processNextRequest();
-  if (mdnsStarted) {
-    MDNS.update();
-  } else if (WiFi.status() == WL_CONNECTED) {
-    setupMDNS();
-  }
-  if (!safeModeActive) {
-    updateWiFiConnect();
-    checkPeriodicStaRetry();
-  }
-  trackClientActivity();
-  updateTelemetry();
-  flushOtaDebugLogs();
-  maybeClearCrashCounterAfterStableUptime();
-  ArduinoOTA.handle();
-  updateLEDs();
-}
-
-void flushOtaDebugLogs() {
-  if (otaDbg.pendingInit) {
-    otaDbg.pendingInit = false;
-    Serial.printf("[OTA][INIT] expected=%u maxUpdate=%u heap=%u\n",
-                  otaDbg.expectedBytes,
-                  otaDbg.maxUpdateSize,
-                  otaDbg.initHeap);
-  }
-
-  if (otaDbg.pendingError) {
-    otaDbg.pendingError = false;
-    Serial.printf("[OTA][ERR] cb=%u chunks=%u off=%u req=%u wrote=%u err=%u heap=%u\n",
-                  otaDbg.cbCount,
-                  otaDbg.chunkCount,
-                  otaDbg.lastOffset,
-                  otaDbg.lastReqChunk,
-                  otaDbg.lastWrote,
-                  otaDbg.lastErr,
-                  otaDbg.lastHeap);
-  }
-
-  if (otaDbg.pendingFinal) {
-    otaDbg.pendingFinal = false;
-    Serial.printf("[OTA][FINAL] ok=%d dtMs=%u bytes=%u/%u chunks=%u maxDtUs=%u err=%u\n",
-                  otaDbg.finalOk ? 1 : 0,
-                  otaDbg.finalDtMs,
-                  otaDbg.totalBytes,
-                  otaDbg.expectedBytes,
-                  otaDbg.chunkCount,
-                  otaDbg.maxDtUs,
-                  otaDbg.lastErr);
-  }
-}
-
-void buildDeviceIdentity() {
-  String mac = WiFi.macAddress();
-  mac.replace(":", "");
-  deviceId = mac.substring(mac.length() - 6);
-  deviceId.toUpperCase();
-  apSsid = String(AP_SSID_BASE) + "-" + deviceId;
-  localHostname = String("ledportal-") + deviceId;
-  localHostname.toLowerCase();
-}
-
-// ─── WiFi AP ─────────────────────────────────────────────
-void setupWiFi() {
-  WiFi.persistent(true);
-  if (safeModeActive) {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(apSsid.c_str(), AP_PASS);
-    delay(100);
-    Serial.println("[SAFE MODE] AP-only mode enabled");
-    Serial.print("[SAFE MODE] AP IP: ");
-    Serial.println(WiFi.softAPIP());
-    return;
-  }
-
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.hostname(localHostname.c_str());
-  WiFi.softAP(apSsid.c_str(), AP_PASS);
-  delay(100);
-  Serial.print("AP IP: ");
-  Serial.println(WiFi.softAPIP());
-
-  if (WiFi.SSID().length() > 0 && beginWiFiConnectAttempt(8000, false)) {
-    WiFi.begin();
-    Serial.println("Trying saved STA credentials...");
-  }
-}
-
-// ─── DNS (Captive Portal) ────────────────────────────────
-void setupDNS() {
-  if ((WiFi.getMode() & WIFI_AP) == 0) {
-    return;
-  }
-  // Redirect all DNS queries to our IP → captive portal
-  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
-}
-
-void setupMDNS() {
-  if (WiFi.status() != WL_CONNECTED || mdnsStarted) {
-    return;
-  }
-  if (MDNS.begin(localHostname.c_str())) {
-    mdnsStarted = true;
-    Serial.print("mDNS: http://");
-    Serial.print(localHostname);
-    Serial.println(".local");
-  } else {
-    Serial.println("mDNS start failed");
-  }
-}
-
-// ─── OTA ─────────────────────────────────────────────────
-void setupOTA() {
-  ArduinoOTA.setHostname(localHostname.c_str());
-  ArduinoOTA.setPassword(OTA_PASS);
-  ArduinoOTA.onStart([]() {
-    otaVisualActive = true;
-    FastLED.clear();
-    FastLED.show();
-    Serial.println("OTA Start");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    uint8_t pct = progress / (total / 100);
-    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-    int litLeds = map(pct, 0, 100, 0, statusLeds);
-    FastLED.clear();
-    for (int i = 0; i < litLeds; i++) {
-      leds[i] = CRGB(0, 255, 0);
-    }
-    FastLED.show();
-  });
-  ArduinoOTA.onEnd([]() {
-    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-    FastLED.clear();
-    fill_solid(leds, statusLeds, CRGB::Green);
-    FastLED.show();
-    otaVisualActive = false;
-    Serial.println("OTA Done!");
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    int statusLeds = min(NUM_LEDS, OTA_STATUS_LEDS);
-    FastLED.clear();
-    fill_solid(leds, statusLeds, CRGB::Red);
-    FastLED.show();
-    otaVisualActive = false;
-    Serial.printf("OTA Error[%u]\n", error);
-  });
-  ArduinoOTA.begin();
-}
-
-// ─── LEDs ────────────────────────────────────────────────
 void setupLEDs() {
-  // Initialize NeoPixel with W-channel support (NEO_GRBW for 4-channel RGBW)
   if (ledStrip) delete ledStrip;
   ledStrip = new Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRBW + NEO_KHZ800);
   ledStrip->begin();
-  ledStrip->setBrightness(state.brightness);
+  ledStrip->setBrightness(ledBrightness);
   ledStrip->clear();
   ledStrip->show();
-  Serial.println("[LED] NeoPixel initialized with W-channel support (RGBW 4-channel mode)");
+  Serial.println("[LED] 60-LED RGBW clock initialized");
 }
 
-void updateLEDs() {
-  if (otaVisualActive) {
+void showLEDs() {
+  if (!ledStrip) return;
+  for (int i = 0; i < NUM_LEDS; i++) {
+    ledStrip->setPixelColor(i, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b, 0));
+  }
+  ledStrip->show();
+}
+
+void displayClock() {
+  time_t now = time(nullptr);
+  if (now < 86400) {
+    // Not synced yet, show red at edges
+    memset(leds, 0, sizeof(leds));
+    leds[0] = {255, 0, 0};
+    leds[NUM_LEDS-1] = {255, 0, 0};
+    showLEDs();
     return;
   }
+  
+  struct tm* t = localtime(&now);
+  uint8_t hour = t->tm_hour % 12;
+  uint8_t min = t->tm_min;
+  uint8_t sec = t->tm_sec;
+  
+  memset(leds, 0, sizeof(leds));
+  
+  if (min < NUM_LEDS) leds[min] = {0, 255, 0};  // Green minute
+  
+  // 3 red LEDs for hour (5 LEDs per hour: 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
+  int hpos = (hour * 5) % NUM_LEDS;
+  for (int i = 0; i < 3; i++) {
+    int pos = (hpos + i) % NUM_LEDS;
+    uint8_t r = (uint16_t)leds[pos].r + 255; if (r > 255) r = 255;
+    leds[pos] = {r, leds[pos].g, leds[pos].b};
+  }
+  
+  // Blue second
+  if (sec < NUM_LEDS) {
+    uint8_t b = leds[sec].b + 255; if (b > 255) b = 255;
+    leds[sec] = {leds[sec].r, leds[sec].g, b};
+  }
+  
+  // Apply brightness
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i].r = (leds[i].r * ledBrightness) / 255;
+    leds[i].g = (leds[i].g * ledBrightness) / 255;
+    leds[i].b = (leds[i].b * ledBrightness) / 255;
+  }
+  
+  showLEDs();
+}
 
-  if (!state.power) {
-    static unsigned long lastPowerOffClear = 0;
-    if (millis() - lastPowerOffClear >= 100) {
-      FastLED.clear(true);
-      lastPowerOffClear = millis();
+// ============================================================================
+// EEPROM Functions
+// ============================================================================
+
+void loadEEPROMSettings() {
+  EEPROM.begin(EEPROM_SIZE);
+  uint8_t magic = EEPROM.read(EEPROM_MAGIC_ADDR);
+  if (magic != EEPROM_MAGIC) {
+    EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+    EEPROM.commit();
+    Serial.println("[EEPROM] Initialized new settings");
+    return;
+  }
+  
+  // Load WiFi SSID
+  String ssid = "";
+  for (int i = 0; i < MAX_SSID_LEN; i++) {
+    char c = EEPROM.read(EEPROM_SSID_ADDR + i);
+    if (c == 0) break;
+    ssid += c;
+  }
+  if (ssid.length() > 0) {
+    String pass = "";
+    for (int i = 0; i < MAX_PASS_LEN; i++) {
+      char c = EEPROM.read(EEPROM_PASS_ADDR + i);
+      if (c == 0) break;
+      pass += c;
     }
+    Serial.println("[EEPROM] Loaded WiFi: " + ssid);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+  }
+  
+  // Load brightness
+  uint8_t br = EEPROM.read(EEPROM_BRIGHTNESS_ADDR);
+  if (br > 0 && br <= 255) ledBrightness = br;
+  
+  // Load timezone offset
+  int32_t tzOff = (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 0) << 24) |
+                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 1) << 16) |
+                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 2) << 8) |
+                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 3));
+  if (tzOff != 0 && tzOff >= -43200 && tzOff <= 43200) tz.utcOffset = tzOff;
+}
+
+void saveEEPROMSettings(const String& ssid, const String& pass) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+  
+  for (int i = 0; i < MAX_SSID_LEN; i++) {
+    EEPROM.write(EEPROM_SSID_ADDR + i, i < ssid.length() ? ssid[i] : 0);
+  }
+  
+  for (int i = 0; i < MAX_PASS_LEN; i++) {
+    EEPROM.write(EEPROM_PASS_ADDR + i, i < pass.length() ? pass[i] : 0);
+  }
+  
+  EEPROM.write(EEPROM_BRIGHTNESS_ADDR, ledBrightness);
+  EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 0, (tz.utcOffset >> 24) & 0xFF);
+  EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 1, (tz.utcOffset >> 16) & 0xFF);
+  EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 2, (tz.utcOffset >> 8) & 0xFF);
+  EEPROM.write(EEPROM_TZ_OFFSET_ADDR + 3, tz.utcOffset & 0xFF);
+  
+  EEPROM.commit();
+  Serial.println("[EEPROM] Saved settings for " + ssid);
+}
+
+// ============================================================================
+// Time & Timezone Functions
+// ============================================================================
+
+void syncTimeNTP() {
+  if (!wifiConnected) return;
+  Serial.println("[NTP] Syncing with " + String(NTP_SERVER));
+  configTime(tz.utcOffset, 0, NTP_SERVER);
+  time_t now = time(nullptr);
+  int attempts = 50;
+  while (now < 86400 && attempts-- > 0) { delay(100); now = time(nullptr); }
+  if (now > 86400) {
+    Serial.println("[NTP] Time synced");
+  }
+  lastNtpSync = millis();
+}
+
+void detectTimezone() {
+  tzDiag.source = "ip-api.com";
+  tzDiag.lastAttemptMs = millis();
+  tzDiag.status = "running";
+  tzDiag.message = "starting detection";
+  tzDiag.httpCode = 0;
+  tzDiag.responseSample = "";
+
+  if (!wifiConnected) {
+    tzDiag.status = "error";
+    tzDiag.message = "wifi not connected";
+    Serial.println("[GEO] Not connected to WiFi, skipping timezone detection");
     return;
   }
+  Serial.println("[GEO] Detecting timezone from IP geolocation...");
 
-  unsigned long interval = map(state.speed, 1, 255, 60, 5);
-  unsigned long now = millis();
-  if (now - lastUpdate < interval) return;
-  lastUpdate = now;
+  struct TzProvider { const char* host; const char* path; const char* label; };
+  TzProvider providers[] = {
+    {"ip-api.com", "/json/?fields=status,message,timezone,offset,country,city", "ip-api"},
+    {"ipwho.is", "/", "ipwho.is"}
+  };
 
-  switch (state.effect) {
-    case 0: effectSolid();    break;
-    case 1: effectRainbow();  break;
-    case 2: effectChase();    break;
-    case 3: effectBreathe();  break;
-    case 4: effectFire();     break;
-    case 5: effectTwinkle();  break;
-    case 6: effectWave();     break;
-    case 7: effectGradient(); break;
+  bool detected = false;
+  for (size_t p = 0; p < (sizeof(providers) / sizeof(providers[0])); p++) {
+    WiFiClient client;
+    tzDiag.source = providers[p].label;
+
+    if (!client.connect(providers[p].host, 80)) {
+      tzDiag.status = "error";
+      tzDiag.message = String("connect failed to ") + providers[p].host;
+      continue;
+    }
+
+    client.print("GET ");
+    client.print(providers[p].path);
+    client.print(" HTTP/1.0\r\nHost: ");
+    client.print(providers[p].host);
+    client.print("\r\nUser-Agent: LED-Clock/2.0\r\nConnection: close\r\n\r\n");
+
+    String line;
+    while (client.connected()) {
+      line = client.readStringUntil('\n');
+      if (line.startsWith("HTTP/")) {
+        int sp = line.indexOf(' ');
+        if (sp > 0 && sp + 4 <= line.length()) {
+          tzDiag.httpCode = line.substring(sp + 1, sp + 4).toInt();
+        }
+      }
+      if (line == "\r") break;
+    }
+
+    String body;
+    unsigned long readStart = millis();
+    while (millis() - readStart < 5000) {
+      while (client.available()) {
+        body += (char)client.read();
+        readStart = millis();
+      }
+      if (!client.connected() && !client.available()) break;
+      delay(5);
+    }
+    client.stop();
+    body.trim();
+
+    if (body.length() == 0) {
+      tzDiag.status = "error";
+      tzDiag.message = "empty response body";
+      tzDiag.responseSample = "<empty>";
+      continue;
+    }
+
+    int startObj = body.indexOf('{');
+    int endObj = body.lastIndexOf('}');
+    if (startObj >= 0 && endObj > startObj) {
+      body = body.substring(startObj, endObj + 1);
+    }
+
+    tzDiag.responseSample = body.substring(0, 160);
+
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, body);
+    if (error) {
+      tzDiag.status = "error";
+      tzDiag.message = (body[0] != '{' && body[0] != '[')
+        ? ("non-json response (http " + String(tzDiag.httpCode) + ")")
+        : ("json parse failed: " + String(error.c_str()));
+      continue;
+    }
+
+    if (doc["status"] && doc["status"].as<String>() != "success") {
+      tzDiag.status = "error";
+      tzDiag.message = "api status=" + doc["status"].as<String>() + (doc["message"] ? (", " + doc["message"].as<String>()) : "");
+      continue;
+    }
+    if (doc["success"] && !doc["success"].as<bool>()) {
+      tzDiag.status = "error";
+      tzDiag.message = "api success=false" + (doc["message"] ? (", " + doc["message"].as<String>()) : "");
+      continue;
+    }
+
+    String tzName = "";
+    int32_t tzOffset = 0;
+    bool hasOffset = false;
+
+    if (doc["timezone"] && doc["timezone"].is<const char*>()) {
+      tzName = doc["timezone"].as<String>();
+    } else if (doc["timezone"] && doc["timezone"].is<JsonObject>() && doc["timezone"]["id"]) {
+      tzName = doc["timezone"]["id"].as<String>();
+    }
+
+    if (doc["offset"] && !doc["offset"].isNull()) {
+      tzOffset = doc["offset"].as<int32_t>();
+      hasOffset = true;
+    } else if (doc["timezone"] && doc["timezone"].is<JsonObject>() && doc["timezone"]["offset"] && !doc["timezone"]["offset"].isNull()) {
+      tzOffset = doc["timezone"]["offset"].as<int32_t>();
+      hasOffset = true;
+    }
+
+    if (tzName.length() == 0 || !hasOffset) {
+      tzDiag.status = "error";
+      tzDiag.message = "missing timezone/offset fields";
+      continue;
+    }
+
+    tz.name = tzName;
+    tz.utcOffset = tzOffset;
+    tz.autoDetected = true;
+    tzDiag.status = "ok";
+    tzDiag.message = "timezone=" + tz.name + ", offset=" + String(tz.utcOffset);
+    tzDiag.lastSuccessMs = millis();
+    detected = true;
+    break;
   }
-  FastLED.show();
-}
 
-// ─── Effects ─────────────────────────────────────────────
-void effectSolid() {
-  fill_solid(leds, NUM_LEDS, state.color1);
-}
-
-void effectRainbow() {
-  fill_rainbow(leds, NUM_LEDS, effectHue++, 7);
-}
-
-void effectChase() {
-  fadeToBlackBy(leds, NUM_LEDS, 40);
-  int pos = beatsin16(map(state.speed, 1, 255, 10, 100), 0, NUM_LEDS - 1);
-  leds[pos] = state.color1;
-}
-
-void effectBreathe() {
-  uint8_t val = beatsin8(map(state.speed, 1, 255, 10, 60), 30, 255);
-  CRGB c = state.color1;
-  c.nscale8(val);
-  fill_solid(leds, NUM_LEDS, c);
-}
-
-void effectFire() {
-  static byte heat[NUM_LEDS];
-  // Cool down
-  for (int i = 0; i < NUM_LEDS; i++) {
-    heat[i] = qsub8(heat[i], random8(0, ((55 * 10) / NUM_LEDS) + 2));
+  if (!detected) {
+    Serial.println("[GEO] All timezone providers failed: " + tzDiag.message);
+    return;
   }
-  // Heat drifts up
-  for (int k = NUM_LEDS - 1; k >= 2; k--) {
-    heat[k] = (heat[k - 1] + heat[k - 2] + heat[k - 2]) / 3;
-  }
-  // Ignite
-  if (random8() < 160) {
-    int y = random8(7);
-    heat[y] = qadd8(heat[y], random8(160, 255));
-  }
-  // Map to colors
-  for (int j = 0; j < NUM_LEDS; j++) {
-    leds[j] = HeatColor(heat[j]);
-  }
-}
-
-void effectTwinkle() {
-  fadeToBlackBy(leds, NUM_LEDS, 20);
-  if (random8() < 80) {
-    int pos = random16(NUM_LEDS);
-    leds[pos] = random8() > 128 ? state.color1 : state.color2;
-  }
-}
-
-void effectWave() {
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t wave = sin8(i * 10 + effectHue);
-    leds[i] = blend(state.color1, state.color2, wave);
-  }
-  effectHue += 2;
-}
-
-void effectGradient() {
-  fill_gradient_RGB(leds, 0, state.color1, NUM_LEDS - 1, state.color2);
-}
-
-// ─── Status JSON ─────────────────────────────────────────
-String getStatusJson() {
-  JsonDocument doc;
-  doc["power"]      = state.power;
-  doc["brightness"] = state.brightness;
-  doc["effect"]     = state.effect;
-  doc["speed"]      = state.speed;
-  doc["heap"]       = ESP.getFreeHeap();
-  doc["fw_version"] = String(FW_VERSION) + " (" + FW_BUILD_DATE + " " + FW_BUILD_TIME + ")";
-  doc["fw_version_short"] = FW_VERSION;
-  doc["fw_build_date"] = FW_BUILD_DATE;
-  doc["fw_build_time"] = FW_BUILD_TIME;
-  doc["num_leds"] = NUM_LEDS;
-  doc["ap_ssid"]    = apSsid;
-  doc["hostname"]   = localHostname;
-  doc["connected"]  = WiFi.status() == WL_CONNECTED;
-  doc["ip"]         = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   
-  // Connection stats
-  if (WiFi.status() == WL_CONNECTED) {
-    doc["sta_ssid"]  = WiFi.SSID();
-    doc["sta_rssi"]  = WiFi.RSSI();
-    doc["sta_channel"] = WiFi.channel();
-    doc["sta_bssid"] = WiFi.BSSIDstr();
-    int rssi = WiFi.RSSI();
-    String quality = "Excellent";
-    if (rssi < -80) quality = "Poor";
-    else if (rssi < -70) quality = "Fair";
-    else if (rssi < -60) quality = "Good";
-    doc["sta_quality"] = quality;
-  } else {
-    doc["sta_ssid"]  = WiFi.SSID().length() > 0 ? WiFi.SSID() : "";
-    doc["sta_rssi"]  = 0;
-    doc["sta_channel"] = 0;
-    doc["sta_bssid"] = "";
-    doc["sta_quality"] = "Not connected";
-  }
-  doc["ap_active"]  = (WiFi.getMode() & WIFI_AP) != 0;
-  doc["ap_clients"] = WiFi.softAPgetStationNum();
-  doc["safe_mode"] = safeModeActive;
-  doc["reset_reason"] = lastResetReason;
-  doc["crash_count"] = bootCrashCount;
-  doc["loop_latency_us"] = loopLatencyUs;
-  doc["loop_latency_max_us"] = loopLatencyMaxUs;
-  doc["heap_trend_delta"] = heapTrendDelta;
-  doc["heap_trend_min"] = heapWindowMin;
-  doc["heap_trend_max"] = heapWindowMax;
-  doc["wifi_reconnects"] = wifiReconnectCount;
-
-  JsonObject ota = doc["ota_status"].to<JsonObject>();
-  ota["in_progress"] = otaStatus.inProgress;
-  ota["last_success"] = otaStatus.lastSuccess;
-  ota["last_error_code"] = otaStatus.lastErrorCode;
-  ota["last_error_text"] = otaStatus.lastErrorText;
-  ota["written_bytes"] = otaStatus.writtenBytes;
-  ota["expected_bytes"] = otaStatus.expectedBytes;
-  ota["last_file"] = otaStatus.lastFileName;
-  
-  char c1[8], c2[8];
-  snprintf(c1, sizeof(c1), "#%02x%02x%02x", state.color1.r, state.color1.g, state.color1.b);
-  snprintf(c2, sizeof(c2), "#%02x%02x%02x", state.color2.r, state.color2.g, state.color2.b);
-  doc["color1"] = c1;
-  doc["color2"] = c2;
-  String out;
-  serializeJson(doc, out);
-  return out;
+  syncTimeNTP();
+  lastTzCheck = millis();
 }
+
+void checkWiFi() {
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck < 5000) return;
+  lastCheck = millis();
+  
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  if (connected != wifiConnected) {
+    wifiConnected = connected;
+    Serial.println("[WiFi] " + String(connected ? "Connected" : "Disconnected"));
+    if (connected) detectTimezone();
+  }
+}
+
+// ============================================================================
+// WiFi Scanning & Connection
+// ============================================================================
 
 String getWifiScanJson() {
-  JsonDocument doc;
+  DynamicJsonDocument doc(2048);
   JsonArray arr = doc["networks"].to<JsonArray>();
-
-  if (safeModeActive) {
-    doc["scanning"] = false;
-    doc["safe_mode"] = true;
-    doc["error"] = "Safe mode active: STA scan disabled (AP-only recovery)";
-    String out;
-    serializeJson(doc, out);
-    return out;
-  }
-
+  
   int scanState = WiFi.scanComplete();
-
   if (scanState == WIFI_SCAN_RUNNING) {
     doc["scanning"] = true;
-  } else if (scanState == WIFI_SCAN_FAILED) {
+  } else if (scanState == WIFI_SCAN_FAILED || scanState < 0) {
     WiFi.scanDelete();
     WiFi.scanNetworks(true, true);
     doc["scanning"] = true;
@@ -1502,20 +434,13 @@ String getWifiScanJson() {
       JsonObject obj = arr.add<JsonObject>();
       obj["ssid"] = ssid;
       obj["rssi"] = WiFi.RSSI(i);
-      obj["enc"]  = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
-
+      obj["enc"] = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
+      
       if (scanCacheCount < MAX_SCAN_CACHE) {
         scanCache[scanCacheCount].ssid = ssid;
         scanCache[scanCacheCount].rssi = WiFi.RSSI(i);
         scanCache[scanCacheCount].channel = WiFi.channel(i);
         scanCache[scanCacheCount].enc = WiFi.encryptionType(i);
-        uint8_t* bssid = WiFi.BSSID(i);
-        if (bssid != nullptr) {
-          scanCache[scanCacheCount].hasBssid = true;
-          memcpy(scanCache[scanCacheCount].bssid, bssid, 6);
-        } else {
-          scanCache[scanCacheCount].hasBssid = false;
-        }
         scanCacheCount++;
       }
     }
@@ -1526,130 +451,71 @@ String getWifiScanJson() {
       doc["scanning"] = true;
     }
   }
-
+  
   String out;
   serializeJson(doc, out);
   return out;
 }
 
-void loadLedPowerState() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = EEPROM.read(EEPROM_MAGIC_ADDR);
-  if (magic == EEPROM_MAGIC) {
-    state.power = EEPROM.read(EEPROM_POWER_ADDR) == 1;
+bool startWiFiConnect(const String& ssid, const String& pass) {
+  if (ssid.length() == 0) return false;
+  if (wifiConnect.active) return false;
+  
+  wifiConnect.active = true;
+  wifiConnect.connecting = true;
+  wifiConnect.attemptedSsid = ssid;
+  wifiConnect.startedAt = millis();
+  wifiConnect.lastStatus = WiFi.status();
+  
+  saveEEPROMSettings(ssid, pass);
+  
+  // Check scan cache for channel
+  int targetChannel = 0;
+  for (int i = 0; i < scanCacheCount; i++) {
+    if (scanCache[i].ssid == ssid) {
+      targetChannel = scanCache[i].channel;
+      break;
+    }
+  }
+  
+  if (targetChannel > 0) {
+    Serial.printf("[WiFi] Connecting to %s on channel %d\n", ssid.c_str(), targetChannel);
+    WiFi.begin(ssid.c_str(), pass.c_str(), targetChannel);
   } else {
-    EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
-    EEPROM.write(EEPROM_POWER_ADDR, state.power ? 1 : 0);
-    EEPROM.commit();
+    WiFi.begin(ssid.c_str(), pass.c_str());
   }
-  Serial.printf("[LED] Restored power state: %s\n", state.power ? "ON" : "OFF");
+  
+  return true;
 }
 
-void saveLedPowerState() {
-  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
-  EEPROM.write(EEPROM_POWER_ADDR, state.power ? 1 : 0);
-  EEPROM.commit();
-  Serial.printf("[LED] Saved power state: %s\n", state.power ? "ON" : "OFF");
-}
-
-bool isCrashResetReason(const String& reason) {
-  String r = reason;
-  r.toLowerCase();
-  return r.indexOf("wdt") >= 0 || r.indexOf("exception") >= 0 || r.indexOf("panic") >= 0;
-}
-
-void evaluateSafeModeOnBoot() {
-  EEPROM.begin(EEPROM_SIZE);
-  lastResetReason = ESP.getResetReason();
-
-  if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC) {
-    EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
-    EEPROM.write(EEPROM_POWER_ADDR, state.power ? 1 : 0);
-    EEPROM.write(EEPROM_CRASH_COUNT_ADDR, 0);
-    EEPROM.commit();
-  }
-
-  bootCrashCount = EEPROM.read(EEPROM_CRASH_COUNT_ADDR);
-  if (isCrashResetReason(lastResetReason)) {
-    if (bootCrashCount < 250) {
-      bootCrashCount++;
-    }
-  } else if (bootCrashCount > 0) {
-    bootCrashCount--;
-  }
-
-  EEPROM.write(EEPROM_CRASH_COUNT_ADDR, bootCrashCount);
-  EEPROM.commit();
-
-  safeModeActive = bootCrashCount >= SAFE_MODE_CRASH_THRESHOLD;
-  Serial.println("[BOOT] Reset reason: " + lastResetReason);
-  Serial.printf("[BOOT] Crash counter: %u\n", bootCrashCount);
-  if (safeModeActive) {
-    Serial.println("[SAFE MODE] Triggered due to repeated crash resets");
+void updateWiFiConnect() {
+  if (!wifiConnect.active) return;
+  
+  wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
+    wifiConnect.active = false;
+    wifiConnect.connecting = false;
+    wifiConnect.success = true;
+    wifiConnected = true;
+    Serial.print("[WiFi] Connected! IP: ");
+    Serial.println(WiFi.localIP());
+    detectTimezone();
+  } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+    wifiConnect.active = false;
+    wifiConnect.connecting = false;
+    wifiConnect.success = false;
+    wifiConnect.error = "Connection failed";
+  } else if (millis() - wifiConnect.startedAt > 30000) {
+    wifiConnect.active = false;
+    wifiConnect.connecting = false;
+    wifiConnect.success = false;
+    wifiConnect.error = "Connection timeout";
   }
 }
 
-void applySafeModeDefaults() {
-  state.power = true;
-  state.effect = 0;
-  state.brightness = min<uint8_t>(state.brightness, 96);
-  state.color1 = CRGB(255, 80, 0);
-  FastLED.setBrightness(state.brightness);
-  fill_solid(leds, NUM_LEDS, state.color1);
-  FastLED.show();
-}
-
-void maybeClearCrashCounterAfterStableUptime() {
-  if (safeModeActive || crashCounterCleared) {
-    return;
-  }
-  if (millis() - bootStartedAt < SAFE_MODE_CLEAR_UPTIME_MS) {
-    return;
-  }
-  if (bootCrashCount > 0) {
-    bootCrashCount = 0;
-    EEPROM.write(EEPROM_CRASH_COUNT_ADDR, 0);
-    EEPROM.commit();
-    Serial.println("[BOOT] Crash counter cleared after stable uptime");
-  }
-  crashCounterCleared = true;
-}
-
-void updateTelemetry() {
-  unsigned long nowUs = micros();
-  if (loopLastMicros != 0) {
-    loopLatencyUs = nowUs - loopLastMicros;
-    if (loopLatencyUs > loopLatencyMaxUs) {
-      loopLatencyMaxUs = loopLatencyUs;
-    }
-  }
-  loopLastMicros = nowUs;
-
-  unsigned long nowMs = millis();
-  if (lastHeapSampleAt == 0 || nowMs - lastHeapSampleAt >= 2000) {
-    lastHeapSampleAt = nowMs;
-    uint32_t heapNow = ESP.getFreeHeap();
-    if (heapWindowStartedAt == 0 || nowMs - heapWindowStartedAt > 60000) {
-      heapWindowStartedAt = nowMs;
-      heapWindowStart = heapNow;
-      heapWindowMin = heapNow;
-      heapWindowMax = heapNow;
-    } else {
-      if (heapNow < heapWindowMin) heapWindowMin = heapNow;
-      if (heapNow > heapWindowMax) heapWindowMax = heapNow;
-    }
-    heapTrendDelta = (int32_t)heapNow - (int32_t)heapWindowStart;
-  }
-
-  bool nowConnected = WiFi.status() == WL_CONNECTED;
-  if (nowConnected && !wifiWasConnected) {
-    if (wifiEverConnected) {
-      wifiReconnectCount++;
-    }
-    wifiEverConnected = true;
-  }
-  wifiWasConnected = nowConnected;
-}
+// ============================================================================
+// OTA & Firmware Update
+// ============================================================================
 
 uint32_t getMaxUpdateSize() {
   return (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
@@ -1675,714 +541,487 @@ const char* updateErrorToString(uint8_t error) {
   }
 }
 
-String getOtaStatusJson() {
-  JsonDocument doc;
-  doc["in_progress"] = otaStatus.inProgress;
-  doc["approved"] = otaStatus.approved;
-  doc["last_success"] = otaStatus.lastSuccess;
-  doc["last_error_code"] = otaStatus.lastErrorCode;
-  doc["last_error_text"] = otaStatus.lastErrorText;
-  doc["last_file"] = otaStatus.lastFileName;
-  doc["expected_bytes"] = otaStatus.expectedBytes;
-  doc["written_bytes"] = otaStatus.writtenBytes;
-  doc["started_at"] = otaStatus.startedAt;
-  doc["finished_at"] = otaStatus.finishedAt;
-  doc["max_size"] = getMaxUpdateSize();
-  doc["free_heap"] = ESP.getFreeHeap();
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
+// ============================================================================
+// Web Pages (HTML)
+// ============================================================================
 
-const char* wifiStatusToString(wl_status_t status) {
-  switch (status) {
-    case WL_NO_SHIELD: return "NO_SHIELD";
-    case WL_IDLE_STATUS: return "IDLE";
-    case WL_NO_SSID_AVAIL: return "NO_SSID";
-    case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
-    case WL_CONNECTED: return "CONNECTED";
-    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
-    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
-    case WL_WRONG_PASSWORD: return "WRONG_PASSWORD";
-    case WL_DISCONNECTED: return "DISCONNECTED";
-    default: return "UNKNOWN";
-  }
-}
+const char INDEX_HTML[] PROGMEM = R"html(
+<!DOCTYPE html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/>
+<title>LED Clock</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui;background:linear-gradient(135deg,#667eea,#764ba2);
+min-height:100vh;padding:20px;color:#333}.container{max-width:600px;margin:0 auto}.clock-card{background:#fff;
+border-radius:20px;padding:40px 20px;margin-bottom:20px;box-shadow:0 10px 40px rgba(0,0,0,0.3);text-align:center}
+.clock-time{font-size:72px;font-weight:300;letter-spacing:4px;color:#667eea;margin-bottom:10px;font-variant-numeric:tabular-nums}
+.card{background:#fff;border-radius:16px;padding:20px;margin-bottom:15px;box-shadow:0 5px 20px rgba(0,0,0,0.2)}
+h3{font-size:14px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:15px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.item{padding:12px;background:#f5f5f5;border-radius:8px;text-align:center}
+.label{font-size:11px;color:#999;text-transform:uppercase;}
+.value{font-size:16px;font-weight:600;color:#333;margin-top:5px}
+.btn{width:100%;padding:12px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;text-transform:uppercase;letter-spacing:1px;
+background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;margin-bottom:10px}
+.btn:active{opacity:0.9}
+</style></head><body><div class='container'>
+<div class='clock-card'><div class='clock-time' id='time'>--:--:--</div><div style='font-size:16px;color:#999;margin-top:10px;' id='date'>Loading</div></div>
+<div class='card'><h3>System</h3><div class='grid'>
+<div class='item'><div class='label'>WiFi</div><div class='value' id='wifi'>--</div></div>
+<div class='item'><div class='label'>Signal</div><div class='value' id='signal'>--</div></div>
+<div class='item'><div class='label'>Timezone</div><div class='value' id='tz'>UTC</div></div>
+<div class='item'><div class='label'>NTP</div><div class='value' id='ntp'>--</div></div>
+</div></div>
+<div class='card'><h3>Device</h3><div class='grid'>
+<div class='item'><div class='label'>Firmware</div><div class='value' id='fw' title='Build timestamp' style='cursor:help;font-size:11px'>-</div></div>
+<div class='item'><div class='label'>TZ Debug</div><div class='value' id='tz_debug'>manual UTC</div></div>
+<div class='item'><div class='label'>Brightness</div><div class='value' id='bright'>-</div></div>
+<div class='item'><div class='label'>IP</div><div class='value' style='font-size:12px' id='ip'>-</div></div>
+<div class='item'><div class='label'>Heap</div><div class='value' id='heap'>-</div></div>
+</div></div>
+<button class='btn' onclick='location.href="/settings.html"'>Settings</button>
+</div>
+<script>
+function updateStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
+const now=new Date();document.getElementById('time').textContent=now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+document.getElementById('date').textContent=now.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+document.getElementById('wifi').textContent=d.wifi_connected?'✓ '+d.wifi_ssid:'✗ Offline';
+document.getElementById('signal').textContent=d.wifi_rssi?d.wifi_rssi+' dBm':'--';
+const tzDebug=d.timezone_auto_detected?'Auto '+d.timezone_utc_offset_hours+'h':'Manual '+d.timezone_utc_offset_hours+'h';
+document.getElementById('tz').textContent=d.timezone||'UTC';
+document.getElementById('tz_debug').textContent=tzDebug;
+document.getElementById('ntp').textContent=d.ntp_synced?'✓ Synced':'⏱ Wait';
+document.getElementById('fw').textContent=d.fw_version_base||'-';document.getElementById('fw').title='Build: '+(d.fw_build_time||'unknown');
+document.getElementById('bright').textContent=d.brightness+'%';
+document.getElementById('ip').textContent=d.ip||'-';
+document.getElementById('heap').textContent=Math.round(d.heap/1024)+' KB';
+}).catch(e=>console.warn(e));}
+setInterval(updateStatus,3000);updateStatus();
+</script></body></html>
+)html";
 
-const char* wifiEncryptionToString(int enc) {
-  switch (enc) {
-    case ENC_TYPE_NONE: return "OPEN";
-    case ENC_TYPE_WEP: return "WEP";
-    case ENC_TYPE_TKIP: return "WPA_TKIP";
-    case ENC_TYPE_CCMP: return "WPA2_CCMP";
-    case ENC_TYPE_AUTO: return "AUTO";
-    default: return "UNKNOWN";
-  }
-}
+const char SETTINGS_HTML[] PROGMEM = R"html(
+<!DOCTYPE html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/>
+<title>Settings</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui;background:linear-gradient(135deg,#667eea,#764ba2);
+min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 auto}.header{color:#fff;margin-bottom:20px;display:flex;align-items:center;gap:15px}
+.back{background:rgba(255,255,255,0.2);border:none;color:#fff;padding:10px 15px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:bold}
+.card{background:#fff;border-radius:12px;padding:20px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,0.2)}
+.card h2{font-size:14px;text-transform:uppercase;letter-spacing:1px;color:#333;margin-bottom:15px;border-bottom:2px solid #667eea;padding-bottom:10px}
+.form-group{margin-bottom:15px}.form-group label{display:block;font-size:12px;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:500}
+.form-group select,.form-group input[type=text],.form-group input[type=password],.form-group input[type=number]{width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;font-family:inherit}
+.form-group input:focus,.form-group select:focus{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,0.1)}
+.wifi-row{display:flex;gap:8px;align-items:center;margin-bottom:10px}.wifi-row select{flex:1}.wifi-row .mini-btn{white-space:nowrap}
+.btn{width:100%;padding:12px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;text-transform:uppercase;letter-spacing:1px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;margin-bottom:10px}
+.btn:hover{opacity:0.9}.btn-secondary{background:#666}
+.mini-btn{display:inline-block;padding:8px 12px;font-size:12px;background:#f0f0f0;color:#333;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-weight:bold}
+.mini-btn:hover{background:#e0e0e0}.mini-btn:disabled{opacity:0.5;cursor:not-allowed}
+.status-msg{font-size:12px;margin-top:8px;padding:8px;border-radius:4px;text-align:center;min-height:1em}
+.status-ok{background:#d4edda;color:#155724;border:1px solid #c3e6cb}.status-err{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb}.status-info{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb}
+.upload-area{border:2px dashed #667eea;border-radius:8px;padding:20px;text-align:center;cursor:pointer;transition:all 0.3s;background:#f9f9f9}
+.upload-area:hover{border-color:#764ba2;background:#f0f0f0}.upload-area p{font-size:12px;color:#666;margin:0}
+.upload-btn{display:block;width:100%;margin-top:10px;padding:10px;font-family:inherit;font-size:12px;background:#667eea;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold}
+.upload-btn:disabled{opacity:0.4;cursor:not-allowed}
+.progress-bar{width:100%;height:4px;background:#e0e0e0;border-radius:2px;margin-top:10px;display:none;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,#667eea,#764ba2);width:0%;transition:width 0.3s}
+.note{font-size:11px;color:#999;margin-top:8px;font-style:italic}
+</style></head><body><div class='container'><div class='header'><button class='back' onclick='history.back()'>&lt; Back</button><h1>Settings</h1></div>
 
-String buildWifiFailureHint() {
-  if (!wifiConnect.targetSeenInScan) {
-    if (scanCacheCount <= 0 || scanCacheUpdatedAt == 0) {
-      return "No recent scan cache available. Press Scan again before Connect. ESP8266 is 2.4GHz-only (cannot join 5GHz).";
-    }
-    return "SSID not seen in scan. ESP8266 is 2.4GHz-only (cannot join 5GHz). Ensure 2.4GHz SSID broadcast is enabled.";
-  }
+<div class='card'><h2>WiFi Configuration</h2>
+<div class='form-group'><label>Available Networks</label><div class='wifi-row'>
+<select id='ssidList' size='6'><option value=''>Scanning...</option></select>
+<button class='mini-btn' id='scanBtn' onclick='scanWifi()' style='height:36px'>SCAN</button>
+</div></div>
+<div class='form-group'><label>Password</label><input type='password' id='wifiPass' placeholder='Network password'/></div>
+<button class='btn' onclick='connectWifi()'>Connect WiFi</button>
+<div class='status-msg' id='wifiMsg'></div>
+</div>
 
-  if (wifiConnect.lastStatus == WL_WRONG_PASSWORD) {
-    return "Wrong password or incompatible security mode. Use WPA2/WPA mixed mode (WPA3-only is not supported on ESP8266).";
-  }
+<div class='card'><h2>Time & Timezone</h2>
+<div class='form-group'><label>NTP Server</label><input type='text' id='ntpServer' value='pool.ntp.org' placeholder='pool.ntp.org'/></div>
+<button class='btn btn-secondary' onclick='syncNTP()'>Sync Now</button>
 
-  if (wifiConnect.lastStatus == WL_NO_SSID_AVAIL) {
-    return "AP not available right now. Check signal, channel, and whether MAC filtering is enabled.";
-  }
+<div class='form-group' style='margin-top:15px'><label>Timezone Mode</label>
+<label style='display:flex;align-items:center;margin-top:8px'><input type='radio' name='tzmode' value='auto' checked onchange='toggleTzMode()' style='margin-right:8px'/>Auto-detect</label>
+<label style='display:flex;align-items:center;margin-top:8px'><input type='radio' name='tzmode' value='manual' onchange='toggleTzMode()' style='margin-right:8px'/>Manual offset</label></div>
 
-  if (wifiConnect.lastStatus == WL_CONNECT_FAILED) {
-    return "Association/authentication failed. Try WPA2-PSK AES, avoid WPA3-only/enterprise, and verify router compatibility.";
-  }
+<div id='manualTz' style='display:none'><div class='form-group'><label>UTC Offset (hours, -12 to +14)</label>
+<input type='number' id='tzOffset' min='-12' max='14' value='0' placeholder='e.g., -5 for EST'/></div></div>
+<button class='btn btn-secondary' onclick='saveTimezone()'>Save Timezone</button>
+<div class='status-msg' id='tzMsg'></div>
+</div>
 
-  return "Connection timed out. Verify 2.4GHz SSID, password, security mode, and signal quality.";
-}
+<div class='card'><h2>Brightness</h2>
+<div class='form-group' style='margin-bottom:5px'><label>LED Brightness</label>
+<input type='range' id='brightness' min='10' max='255' value='76' oninput='updateBrightnessLabel()' style='width:100%'/></div>
+<div style='text-align:center;font-size:12px;color:#666'>
+<span id='brightLabel'>30%</span> (<span id='brightValue'>76</span>/255)</div>
+<button class='btn btn-secondary' onclick='saveBrightness()'>Save Brightness</button>
+</div>
 
-String getCaptivePortalUrl() {
-  if ((WiFi.getMode() & WIFI_AP) != 0) {
-    return String("http://") + WiFi.softAPIP().toString() + "/";
-  }
-  return String("http://") + localHostname + ".local/";
-}
+<div class='card'><h2>Firmware Update</h2>
+<div class='upload-area' onclick='document.getElementById("fwFile").click()' id='uploadArea'>
+<p id='fileName'>📁 Click to select .bin firmware file</p>
+<input type='file' id='fwFile' accept='.bin' style='display:none' onchange='fileSelected(this)'>
+</div>
+<button class='upload-btn' id='uploadBtn' onclick='uploadFirmware()' disabled>Upload Firmware</button>
+<div class='progress-bar' id='progBar'><div class='progress-fill' id='progFill'></div></div>
+<div class='status-msg' id='statusMsg'></div>
+<div class='note'>Max size: <span id='maxSize'>-</span> bytes</div>
+</div>
 
-bool startWiFiConnect(const String& ssid, const String& pass) {
-  if (safeModeActive) {
-    return false;
-  }
+<div class='card'><h2>Device Information</h2>
+<div style='font-size:12px;line-height:1.8;color:#666'>
+<div>Firmware: <span id='fwVersion'>-</span> <span id='fwBuildTime' style='font-size:10px;color:#999'></span></div>
+<div>IP Address: <span id='deviceIp'>-</span></div>
+<div>WiFi Mode: <span id='wifiMode'>AP</span></div>
+<div>Signal: <span id='signal'>-</span></div>
+<div>Timezone: <span id='tzDisplay'>UTC</span> <span id='tzMode' style='font-size:10px;color:#999'></span></div>
+<div id='tzDebug' style='margin-top:8px;padding:4px;background:#f5f5f5;border-radius:3px;color:#666;font-size:10px;display:none'>
+Offset: <span id='tzOffset'>0</span>h (<span id='tzOffsetSec'>0</span>s) | Auto-detected: <span id='tzAuto'>no</span>
+</div>
+<div style='margin-top:6px;font-size:10px;color:#666'>Detect status: <span id='tzDetectStatus'>-</span></div>
+<div style='margin-top:2px;font-size:10px;color:#666'>Detect message: <span id='tzDetectMsg'>-</span></div>
+</div></div>
 
-  if (ssid.length() == 0) {
-    return false;
-  }
+</div>
 
-  if (!beginWiFiConnectAttempt(15000, true)) {
-    return false;
-  }
+<script>
+let fwFile=null,uploading=false;function updateBrightnessLabel(){const v=document.getElementById('brightness').value;
+document.getElementById('brightValue').textContent=v;document.getElementById('brightLabel').textContent=(Math.round(v/255*100))+'%';}
+function toggleTzMode(){document.getElementById('manualTz').style.display=document.querySelector('input[name="tzmode"]:checked').value==='manual'?'block':'none';}
+function fileSelected(input){const sb=document.getElementById('statusMsg');const ub=document.getElementById('uploadBtn');fwFile=null;ub.disabled=true;
+if(input.files.length===0)return;fwFile=input.files[0];document.getElementById('fileName').textContent='📄 '+fwFile.name;sb.textContent='Checking firmware...';sb.className='status-msg status-info';
+const r=new FileReader();r.onload=()=>{const b=new Uint8Array(r.result);const m=b.length>0?b[0]:0;
+fetch('/api/update/precheck?name='+encodeURIComponent(fwFile.name)+'&size='+fwFile.size+'&magic='+m).then(r=>r.json()).then(d=>{
+if(d.ok){ub.disabled=false;sb.textContent='✓ '+d.summary;sb.className='status-msg status-ok';}else{ub.disabled=true;sb.textContent='✗ '+d.error;sb.className='status-msg status-err';}}).catch(e=>{ub.disabled=true;sb.textContent='Check failed: '+e;sb.className='status-msg status-err';});};
+r.onerror=()=>{ub.disabled=true;sb.textContent='Failed to read file';sb.className='status-msg status-err';};r.readAsArrayBuffer(fwFile.slice(0,1));}
+function uploadFirmware(){if(!fwFile||uploading)return;if(!confirm('Upload '+fwFile.name+'?'))return;uploading=true;document.getElementById('uploadBtn').disabled=true;
+const sb=document.getElementById('statusMsg');const pb=document.getElementById('progBar');const pf=document.getElementById('progFill');pb.style.display='block';sb.textContent='';
+const fd=new FormData();fd.append('firmware',fwFile);const x=new XMLHttpRequest();
+x.upload.addEventListener('progress',(e)=>{if(e.lengthComputable)pf.style.width=(e.loaded/e.total*100)+'%';});
+x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='✓ Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='✗ '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='✗ Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
+x.addEventListener('error',()=>{uploading=false;sb.textContent='✗ Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
+x.open('POST','/api/update?approve=1');x.send(fd);}
+function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const msg=document.getElementById('wifiMsg');
+if(attempt===0){msg.textContent='Scanning...';msg.className='status-msg status-info';sb.disabled=true;}
+fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{if(d.scanning){if(attempt>25){msg.textContent='Scan timeout';msg.className='status-msg status-err';sb.disabled=false;return;}
+setTimeout(()=>scanWifi(attempt+1),350);return;}
+list.innerHTML='';if(!d.networks||d.networks.length===0){list.innerHTML='<option>No networks found</option>';msg.textContent='';msg.className='status-msg';sb.disabled=false;return;}
+d.networks.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';list.appendChild(o);});
+msg.textContent='Found '+d.networks.length+' networks';msg.className='status-msg status-ok';sb.disabled=false;}).catch(e=>{list.innerHTML='<option>Scan failed</option>';msg.textContent='Error: '+e;msg.className='status-msg status-err';sb.disabled=false;});}
+function connectWifi(){const s=document.getElementById('ssidList').value;const p=document.getElementById('wifiPass').value;const msg=document.getElementById('wifiMsg');
+if(!s){msg.textContent='Select a network first';msg.className='status-msg status-err';return;}msg.textContent='Connecting...';msg.className='status-msg status-info';
+const sp=new URLSearchParams({ssid:s,pass:p});fetch('/api/wifi/connect?'+sp.toString()).then(r=>r.json()).then(d=>{
+if(d.connected){msg.textContent='✓ Connected! IP: '+d.ip;msg.className='status-msg status-ok';}else if(d.connecting){msg.textContent='Connecting, please wait...';msg.className='status-msg status-info';setTimeout(()=>connectWifi(),500);}else{msg.textContent='✗ '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Connection failed: '+e;msg.className='status-msg status-err';});}
+function syncNTP(){const msg=document.getElementById('tzMsg');msg.textContent='Syncing...';msg.className='status-msg status-info';
+fetch('/api/ntp').then(r=>r.text()).then(t=>{msg.textContent='✓ Syncing with NTP server...';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='✗ Error: '+e;msg.className='status-msg status-err';});}
+function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:checked').value;const o=m==='manual'?document.getElementById('tzOffset').value:'0';
+const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
+fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='✓ Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='✗ Error: '+e;b.className='status-msg status-err';});}
+function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
+function pollStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
+document.getElementById('fwVersion').textContent=d.fw_version_base||'-';
+document.getElementById('fwBuildTime').textContent='('+d.fw_build_time+')';
+document.getElementById('deviceIp').textContent=d.ip||'-';
+document.getElementById('wifiMode').textContent=d.wifi_connected?'STA (Connected)':'AP (Hotspot)';
+document.getElementById('signal').textContent=d.wifi_connected?(d.wifi_rssi+' dBm'):'(AP mode)';
+document.getElementById('tzDisplay').textContent=d.timezone||'UTC';
+document.getElementById('tzMode').textContent=(d.timezone_auto_detected?'auto':'manual');
+document.getElementById('tzOffset').textContent=d.timezone_utc_offset_hours;
+document.getElementById('tzOffsetSec').textContent=d.timezone_utc_offset_seconds;
+document.getElementById('tzAuto').textContent=d.timezone_auto_detected?'yes':'no';
+document.getElementById('tzDetectStatus').textContent=d.tz_detect_status||'-';
+document.getElementById('tzDetectMsg').textContent=d.tz_detect_message||'-';
+document.getElementById('tzDebug').style.display='block';
+}).catch(e=>console.warn(e));}
+function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
+pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);
+</script></body></html>
+)html";
 
-  Serial.println("[WiFi] Switching to STA-only mode for connection attempt");
-  
-  WiFi.disconnect(false);
-  delay(200);
-  
-  WiFi.mode(WIFI_STA);
-  delay(100);
-  WiFi.hostname(localHostname.c_str());
-  
-  WiFi.persistent(true);
+// ============================================================================
+// Web Server Setup
+// ============================================================================
 
-  wifiConnect.attemptedSsid = ssid;
-  wifiConnect.passLen = pass.length();
-  wifiConnect.lastStatus = WiFi.status();
-  wifiConnect.targetSeenInScan = false;
-  wifiConnect.targetChannel = -1;
-  wifiConnect.targetRssi = 0;
-  wifiConnect.targetEnc = -1;
-  wifiConnect.targetHasBssid = false;
-  wifiConnect.lastElapsedMs = 0;
-
-  // Check scan cache for channel and encryption info (for diagnostics only, not used for connection)
-  if (scanCacheCount > 0) {
-    for (int i = 0; i < scanCacheCount; i++) {
-      if (scanCache[i].ssid == ssid) {
-        wifiConnect.targetSeenInScan = true;
-        wifiConnect.targetChannel = scanCache[i].channel;
-        wifiConnect.targetRssi = scanCache[i].rssi;
-        wifiConnect.targetEnc = scanCache[i].enc;
-        wifiConnect.targetHasBssid = scanCache[i].hasBssid;
-        if (scanCache[i].hasBssid) {
-          memcpy(wifiConnect.targetBssid, scanCache[i].bssid, 6);
-        }
-        break;
-      }
-    }
-  }
-
-  if (!wifiConnect.targetSeenInScan) {
-    int scanCount = WiFi.scanNetworks(false, true);
-    scanCacheCount = 0;
-    for (int i = 0; i < scanCount; i++) {
-      String foundSsid = WiFi.SSID(i);
-      if (foundSsid.length() == 0) continue;
-      if (scanCacheCount < MAX_SCAN_CACHE) {
-        scanCache[scanCacheCount].ssid = foundSsid;
-        scanCache[scanCacheCount].rssi = WiFi.RSSI(i);
-        scanCache[scanCacheCount].channel = WiFi.channel(i);
-        scanCache[scanCacheCount].enc = WiFi.encryptionType(i);
-        uint8_t* bssid = WiFi.BSSID(i);
-        if (bssid != nullptr) {
-          scanCache[scanCacheCount].hasBssid = true;
-          memcpy(scanCache[scanCacheCount].bssid, bssid, 6);
-        } else {
-          scanCache[scanCacheCount].hasBssid = false;
-        }
-        scanCacheCount++;
-      }
-
-      if (foundSsid == ssid) {
-        wifiConnect.targetSeenInScan = true;
-        wifiConnect.targetChannel = WiFi.channel(i);
-        wifiConnect.targetRssi = WiFi.RSSI(i);
-        wifiConnect.targetEnc = WiFi.encryptionType(i);
-        uint8_t* bssid = WiFi.BSSID(i);
-        if (bssid != nullptr) {
-          wifiConnect.targetHasBssid = true;
-          memcpy(wifiConnect.targetBssid, bssid, 6);
-        }
-      }
-    }
-    scanCacheUpdatedAt = millis();
-    WiFi.scanDelete();
-  }
-
-  if (wifiConnect.targetChannel > 0 && wifiConnect.targetHasBssid) {
-    Serial.printf("[WiFi] Using channel %d + BSSID lock\n", wifiConnect.targetChannel);
-    WiFi.begin(ssid.c_str(), pass.c_str(), wifiConnect.targetChannel, wifiConnect.targetBssid, true);
-  } else if (wifiConnect.targetChannel > 0) {
-    Serial.printf("[WiFi] Using channel %d from scan cache\n", wifiConnect.targetChannel);
-    WiFi.begin(ssid.c_str(), pass.c_str(), wifiConnect.targetChannel);
-  } else {
-    WiFi.begin(ssid.c_str(), pass.c_str());
-  }
-  delay(200);
-  
-  Serial.println("[WiFi] Connecting...");
-  Serial.println("[WiFi] SSID: " + ssid);
-  Serial.printf("[WiFi] Password length: %u\n", wifiConnect.passLen);
-  Serial.printf("[WiFi] ESP8266 MAC: %s\n", WiFi.macAddress().c_str());
-  Serial.printf("[WiFi] Status before begin: %s (%d)\n", wifiStatusToString(wifiConnect.lastStatus), wifiConnect.lastStatus);
-  Serial.printf("[WiFi] WiFi mode: %d (1=STA, 2=AP, 3=AP_STA)\n", (int)WiFi.getMode());
-  Serial.printf("[WiFi] AP enabled: %s, STA enabled: %s\n",
-    (WiFi.getMode() & WIFI_AP) ? "yes" : "no",
-    (WiFi.getMode() & WIFI_STA) ? "yes" : "no");
-  if (wifiConnect.targetSeenInScan) {
-    Serial.printf("[WiFi] Target seen in scan: yes, CH=%d RSSI=%d ENC=%s (%d)\n",
-      wifiConnect.targetChannel,
-      (int)wifiConnect.targetRssi,
-      wifiEncryptionToString(wifiConnect.targetEnc),
-      wifiConnect.targetEnc);
-  } else {
-    Serial.printf("[WiFi] Target seen in last scan cache: no (cache_count=%d, age_ms=%lu)\n", scanCacheCount, millis() - scanCacheUpdatedAt);
-  }
-
-  return true;
-}
-
-void updateWiFiConnect() {
-  if (!wifiConnect.active) {
-    return;
-  }
-
-  wifiConnect.lastStatus = WiFi.status();
-  wifiConnect.lastElapsedMs = millis() - wifiConnect.startedAt;
-
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_STA);
-    dnsServer.stop();
-    setupMDNS();
-    Serial.print("WiFi connected. IP: ");
-    Serial.println(WiFi.localIP());
-
-    wifiConnect.active = false;
-    wifiConnect.resultReady = wifiConnect.reportResult;
-    wifiConnect.success = true;
-    wifiConnect.error = "";
-    Serial.printf("[WiFi] Connected to %s in %lu ms\n", wifiConnect.attemptedSsid.c_str(), wifiConnect.lastElapsedMs);
-    Serial.printf("[WiFi] STA IP: %s, BSSID: %s, CH: %d, RSSI: %d\n",
-      WiFi.localIP().toString().c_str(),
-      WiFi.BSSIDstr().c_str(),
-      WiFi.channel(),
-      WiFi.RSSI());
-    return;
-  }
-
-  if (millis() - wifiConnect.startedAt >= wifiConnect.timeoutMs) {
-    String hint = buildWifiFailureHint();
-    String errorText = String("Could not connect to '") + wifiConnect.attemptedSsid +
-      "'. status=" + wifiStatusToString(wifiConnect.lastStatus) +
-      " (" + String((int)wifiConnect.lastStatus) + "). " + hint;
-
-    Serial.println("[WiFi] Connect failed");
-    Serial.printf("[WiFi] SSID: %s, elapsed: %lu ms\n", wifiConnect.attemptedSsid.c_str(), wifiConnect.lastElapsedMs);
-    Serial.printf("[WiFi] Final status: %s (%d)\n", wifiStatusToString(wifiConnect.lastStatus), wifiConnect.lastStatus);
-    if (wifiConnect.targetSeenInScan) {
-      Serial.printf("[WiFi] Scan cache target: CH=%d RSSI=%d ENC=%s (%d)\n",
-        wifiConnect.targetChannel,
-        (int)wifiConnect.targetRssi,
-        wifiEncryptionToString(wifiConnect.targetEnc),
-        wifiConnect.targetEnc);
-    } else {
-      Serial.println("[WiFi] Scan cache target: not seen");
-    }
-    Serial.println("[WiFi] Hint: " + hint);
-
-    wifiConnect.active = false;
-    wifiConnect.resultReady = wifiConnect.reportResult;
-    wifiConnect.success = false;
-    wifiConnect.error = errorText;
-    
-    // Fallback to AP mode on failure
-    ensureApFallback();
-  }
-}
-
-void ensureApFallback() {
-  if ((WiFi.getMode() & WIFI_AP) == 0) {
-    Serial.println("[WiFi] STA failed, re-enabling AP fallback");
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(apSsid.c_str(), AP_PASS);
-    delay(100);
-    setupDNS();
-    Serial.print("[WiFi] AP fallback IP: ");
-    Serial.println(WiFi.softAPIP());
-  }
-}
-
-void trackClientActivity() {
-  static unsigned long lastCheck = 0;
-  if (millis() - lastCheck < 5000) return;
-  lastCheck = millis();
-  
-  activeClientCount = WiFi.softAPgetStationNum();
-  if (activeClientCount > 0) {
-    lastClientActivity = millis();
-  }
-}
-
-void checkPeriodicStaRetry() {
-  // Only retry if:
-  // 1. Not currently connecting
-  // 2. Not connected
-  // 3. Have saved credentials
-  // 4. Retry interval elapsed
-  // 5. No active clients (or client inactive for 2min)
-  
-  if (safeModeActive) return;
-  if (wifiConnect.active) return;
-  if (WiFi.status() == WL_CONNECTED) return;
-  if (WiFi.SSID().length() == 0) return;
-  if (millis() - lastStaRetryAt < STA_RETRY_INTERVAL) return;
-  
-  bool hasRecentActivity = (millis() - lastClientActivity < 120000);
-  if (activeClientCount > 0 && hasRecentActivity) return;
-  
-  Serial.println("[WiFi] Periodic STA retry attempt");
-  lastStaRetryAt = millis();
-  
-  if (beginWiFiConnectAttempt(15000, false)) {
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.hostname(localHostname.c_str());
-    WiFi.begin();
-    Serial.printf("[WiFi] Retrying saved SSID: %s\n", WiFi.SSID().c_str());
-  }
-}
-
-// ─── Parse hex color ─────────────────────────────────────
-CRGB parseHexColor(const String& hex) {
-  String h = hex;
-  if (h.startsWith("#")) h = h.substring(1);
-  long val = strtol(h.c_str(), NULL, 16);
-  return CRGB((val >> 16) & 0xFF, (val >> 8) & 0xFF, val & 0xFF);
-}
-
-// ─── Web Server ──────────────────────────────────────────
 void setupWebServer() {
-  // ── Captive portal detection endpoints ──
-  // Android
-  server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
+  // Main page - just clock & status
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) { 
+    req->send_P(200, "text/html", INDEX_HTML); 
   });
-  server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
+  
+  // Settings page
+  server.on("/settings.html", HTTP_GET, [](AsyncWebServerRequest *req) { 
+    req->send_P(200, "text/html", SETTINGS_HTML); 
   });
-  // Apple
-  server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
-  });
-  server.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
-  });
-  // Microsoft
-  server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
-  });
-  server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
-  });
-  // Firefox
-  server.on("/canonical.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
-  });
-
-  // ── Main page ──
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send_P(200, "text/html", INDEX_HTML);
-  });
-
-  // ── API Endpoints ──
+  
+  // API: Status
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", getStatusJson());
+    DynamicJsonDocument doc(1408);
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    String fullVersion = String(FW_VERSION_BASE) + " (" + FW_BUILD_TIME + ")";
+    doc["fw_version"] = fullVersion;
+    doc["fw_version_base"] = FW_VERSION_BASE;
+    doc["fw_build_time"] = FW_BUILD_TIME;
+    doc["time_hour"] = t->tm_hour;
+    doc["time_minute"] = t->tm_min;
+    doc["time_second"] = t->tm_sec;
+    doc["ntp_synced"] = (now > 86400);
+    doc["wifi_connected"] = wifiConnected;
+    doc["wifi_ssid"] = WiFi.SSID();
+    doc["wifi_rssi"] = wifiConnected ? WiFi.RSSI() : 0;
+    doc["timezone"] = tz.name;
+    doc["timezone_auto_detected"] = tz.autoDetected;
+    doc["timezone_utc_offset_hours"] = tz.utcOffset / 3600;
+    doc["timezone_utc_offset_seconds"] = tz.utcOffset;
+    doc["tz_detect_source"] = tzDiag.source;
+    doc["tz_detect_status"] = tzDiag.status;
+    doc["tz_detect_message"] = tzDiag.message;
+    doc["tz_detect_http_code"] = tzDiag.httpCode;
+    doc["tz_detect_last_attempt_ms"] = tzDiag.lastAttemptMs;
+    doc["tz_detect_last_success_ms"] = tzDiag.lastSuccessMs;
+    doc["tz_detect_response_sample"] = tzDiag.responseSample;
+    doc["brightness"] = (ledBrightness * 100) / 255;
+    doc["ip"] = wifiConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+    doc["heap"] = ESP.getFreeHeap();
+    String json;
+    serializeJson(doc, json);
+    req->send(200, "application/json", json);
   });
-
-  server.on("/api/power", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (req->hasParam("on")) {
-      bool newPower = req->getParam("on")->value() == "1";
-      if (state.power != newPower) {
-        state.power = newPower;
-        saveLedPowerState();
-      }
-    }
-    req->send(200, "application/json", getStatusJson());
-  });
-
-  server.on("/api/brightness", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (req->hasParam("value")) {
-      state.brightness = req->getParam("value")->value().toInt();
-      FastLED.setBrightness(state.brightness);
-    }
-    req->send(200, "application/json", getStatusJson());
-  });
-
-  server.on("/api/speed", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (req->hasParam("value")) {
-      state.speed = req->getParam("value")->value().toInt();
-    }
-    req->send(200, "application/json", getStatusJson());
-  });
-
-  server.on("/api/effect", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (req->hasParam("id")) {
-      state.effect = req->getParam("id")->value().toInt();
-    }
-    req->send(200, "application/json", getStatusJson());
-  });
-
-  server.on("/api/color", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (req->hasParam("c1")) {
-      state.color1 = parseHexColor(req->getParam("c1")->value());
-    }
-    if (req->hasParam("c2")) {
-      state.color2 = parseHexColor(req->getParam("c2")->value());
-    }
-    req->send(200, "application/json", getStatusJson());
-  });
-
+  
+  // API: WiFi Scan
   server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "application/json", getWifiScanJson());
   });
-
+  
+  // API: WiFi Connect
   server.on("/api/wifi/connect", HTTP_GET, [](AsyncWebServerRequest *req) {
-    JsonDocument doc;
-    doc["hostname"] = localHostname;
-    doc["safe_mode"] = safeModeActive;
-
-    if (safeModeActive) {
-      doc["connecting"] = false;
-      doc["connected"] = false;
-      doc["error"] = "Safe mode active: STA disabled. Reboot into normal mode after stabilizing firmware.";
-      String out;
-      serializeJson(doc, out);
-      req->send(200, "application/json", out);
-      return;
-    }
-
+    DynamicJsonDocument doc(256);
+    
     if (req->hasParam("ssid")) {
-      if (wifiConnect.active) {
+      String ssid = req->getParam("ssid")->value();
+      String pass = req->hasParam("pass") ? req->getParam("pass")->value() : "";
+      
+      if (startWiFiConnect(ssid, pass)) {
         doc["connecting"] = true;
       } else {
-        String ssid = req->getParam("ssid")->value();
-        String pass = req->hasParam("pass") ? req->getParam("pass")->value() : "";
-        if (startWiFiConnect(ssid, pass)) {
-          doc["connecting"] = true;
-        } else {
-          doc["connecting"] = false;
-          doc["connected"] = false;
-          doc["error"] = "Missing SSID or connection already in progress";
+        doc["connecting"] = false;
+        doc["error"] = "Connection already in progress or invalid SSID";
+      }
+    } else {
+      updateWiFiConnect();
+      if (wifiConnect.active) {
+        doc["connecting"] = true;
+      } else if (wifiConnect.success) {
+        doc["connecting"] = false;
+        doc["connected"] = true;
+        doc["ip"] = WiFi.localIP().toString();
+        wifiConnect.success = false;
+      } else {
+        doc["connecting"] = false;
+        doc["connected"] = wifiConnected;
+        if (wifiConnect.error.length() > 0) {
+          doc["error"] = wifiConnect.error;
+          wifiConnect.error = "";
         }
       }
-    } else if (wifiConnect.active) {
-      doc["connecting"] = true;
-    } else if (wifiConnect.resultReady) {
-      doc["connecting"] = false;
-      doc["connected"] = wifiConnect.success;
-      doc["ip"] = wifiConnect.success ? WiFi.localIP().toString() : "";
-      if (!wifiConnect.success) {
-        doc["error"] = wifiConnect.error;
-      }
-      wifiConnect.resultReady = false;
-    } else {
-      doc["connecting"] = false;
-      doc["connected"] = WiFi.status() == WL_CONNECTED;
-      doc["ip"] = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "";
-      if (WiFi.status() != WL_CONNECTED) {
-        doc["error"] = "No active connection attempt";
-      }
     }
-
-    JsonObject debug = doc["debug"].to<JsonObject>();
-    debug["ssid"] = wifiConnect.attemptedSsid;
-    debug["status"] = wifiStatusToString(wifiConnect.lastStatus);
-    debug["status_code"] = (int)wifiConnect.lastStatus;
-    debug["elapsed_ms"] = wifiConnect.lastElapsedMs;
-    debug["target_seen"] = wifiConnect.targetSeenInScan;
-    debug["target_channel"] = wifiConnect.targetChannel;
-    debug["target_rssi"] = wifiConnect.targetRssi;
-    debug["target_encryption"] = wifiEncryptionToString(wifiConnect.targetEnc);
-    debug["target_encryption_code"] = wifiConnect.targetEnc;
-    debug["scan_cache_count"] = scanCacheCount;
-    debug["scan_cache_age_ms"] = scanCacheUpdatedAt > 0 ? (millis() - scanCacheUpdatedAt) : -1;
-    debug["hint"] = buildWifiFailureHint();
-
-    String out;
-    serializeJson(doc, out);
-    req->send(200, "application/json", out);
+    
+    String json;
+    serializeJson(doc, json);
+    req->send(200, "application/json", json);
   });
-
-  server.on("/api/update/status", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", getOtaStatusJson());
+  
+  // API: Brightness
+  server.on("/api/brightness", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (req->hasParam("value")) {
+      int val = atoi(req->getParam("value")->value().c_str());
+      ledBrightness = (val * 255) / 100;
+      if (ledStrip) ledStrip->setBrightness(ledBrightness);
+    }
+    req->send(200, "text/plain", "OK");
   });
-
+  
+  // API: Timezone
+  server.on("/api/timezone", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (req->hasParam("mode")) {
+      if (req->getParam("mode")->value() == "auto") {
+        tz.autoDetected = true;
+        tzDiag.status = "running";
+        tzDiag.message = "auto mode requested";
+        detectTimezone();
+        req->send(200, "text/plain", "Auto-detecting...");
+      } else if (req->hasParam("offset")) {
+        tz.utcOffset = (int32_t)(atof(req->getParam("offset")->value().c_str()) * 3600);
+        tz.autoDetected = false;
+        tz.name = "Manual";
+        syncTimeNTP();
+        req->send(200, "text/plain", "Manual timezone set");
+      } else {
+        req->send(400, "text/plain", "Missing offset param");
+      }
+    } else {
+      req->send(400, "text/plain", "Missing mode param");
+    }
+  });
+  
+  // API: NTP Sync
+  server.on("/api/ntp", HTTP_GET, [](AsyncWebServerRequest *req) {
+    syncTimeNTP();
+    req->send(200, "text/plain", "Syncing...");
+  });
+  
+  // API: OTA Precheck
   server.on("/api/update/precheck", HTTP_GET, [](AsyncWebServerRequest *req) {
-    JsonDocument doc;
+    DynamicJsonDocument doc(256);
     if (!req->hasParam("name") || !req->hasParam("size") || !req->hasParam("magic")) {
       doc["ok"] = false;
-      doc["error"] = "Missing name/size/magic";
+      doc["error"] = "Missing parameters";
     } else {
       String name = req->getParam("name")->value();
       size_t size = (size_t) req->getParam("size")->value().toInt();
       int magic = req->getParam("magic")->value().toInt();
       uint32_t maxSize = getMaxUpdateSize();
-
+      
       bool extOk = name.endsWith(".bin") || name.endsWith(".BIN");
       bool sizeOk = size > 0 && size <= maxSize;
       bool magicOk = (magic == 0xE9);
-
+      
       doc["ok"] = extOk && sizeOk && magicOk;
-      doc["ext_ok"] = extOk;
-      doc["size_ok"] = sizeOk;
-      doc["magic_ok"] = magicOk;
-      doc["max_size"] = maxSize;
-      doc["file_size"] = size;
-      doc["magic"] = magic;
-
       if (doc["ok"].as<bool>()) {
-        doc["summary"] = String("name=") + name + ", size=" + String(size) + " bytes, max=" + String(maxSize) + ", magic=0xE9";
+        doc["summary"] = String(name + " (" + String(size) + " bytes)");
       } else {
         String err;
-        if (!extOk) err += "File must be .bin. ";
-        if (!sizeOk) err += "File too large for available OTA space. ";
-        if (!magicOk) err += "Invalid firmware header (expected 0xE9).";
+        if (!extOk) err += "Invalid file type (must be .bin). ";
+        if (!sizeOk) err += "File too large (max " + String(maxSize) + " bytes). ";
+        if (!magicOk) err += "Invalid firmware magic. ";
         doc["error"] = err;
       }
     }
-    String out;
-    serializeJson(doc, out);
-    req->send(200, "application/json", out);
+    String json;
+    serializeJson(doc, json);
+    req->send(200, "application/json", json);
   });
-
-  // ── Firmware Update (HTTP) ──
+  
+  // API: OTA Upload
   server.on("/api/update", HTTP_POST,
-    // Response handler
     [](AsyncWebServerRequest *req) {
-      JsonDocument doc;
-      bool approved = req->hasParam("approve") && req->getParam("approve")->value() == "1";
-      bool success = approved && otaStatus.lastSuccess && !Update.hasError() && otaStatus.writtenBytes > 0;
-
-      otaStatus.inProgress = false;
-      otaStatus.finishedAt = millis();
-      otaStatus.lastSuccess = success;
-      otaStatus.approved = approved;
-
-      if (!approved) {
-        otaStatus.lastErrorCode = UPDATE_ERROR_STREAM;
-        otaStatus.lastErrorText = "Upload not approved. Run precheck and confirm upload in Web UI.";
-      } else if (Update.hasError()) {
-        otaStatus.lastErrorCode = Update.getError();
-        otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-      } else if (!otaStatus.lastSuccess) {
-        otaStatus.lastErrorCode = UPDATE_ERROR_STREAM;
-        otaStatus.lastErrorText = "Upload finalization failed.";
-      } else {
-        otaStatus.lastErrorCode = UPDATE_ERROR_OK;
-        otaStatus.lastErrorText = "OK";
-      }
-
-      doc["ok"] = success;
-      doc["approved"] = approved;
-      doc["written"] = otaStatus.writtenBytes;
-      doc["expected"] = otaStatus.expectedBytes;
-      doc["error_code"] = otaStatus.lastErrorCode;
-      doc["error"] = otaStatus.lastErrorText;
-      doc["file"] = otaStatus.lastFileName;
-
-      String out;
-      serializeJson(doc, out);
-      req->send(success ? 200 : 500, "application/json", out);
-
+      bool success = !Update.hasError() && Update.isFinished();
+      req->send(success ? 200 : 500, "application/json", 
+        String("{\"ok\":") + (success ? "true" : "false") + ",\"written\":" + String(Update.progress()) + "}");
       if (success) {
-        delay(600);
+        delay(500);
         ESP.restart();
       }
     },
-    // Upload handler
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
       if (index == 0) {
-        bool approved = req->hasParam("approve") && req->getParam("approve")->value() == "1";
-        if (!approved) {
-          otaStatus.inProgress = false;
-          otaStatus.lastSuccess = false;
-          otaStatus.lastErrorCode = UPDATE_ERROR_STREAM;
-          otaStatus.lastErrorText = "Missing approve=1";
-          otaStatus.lastFileName = filename;
-          return;
-        }
-
-        otaVisualActive = true;
-        otaStatus.inProgress = true;
-        otaStatus.approved = true;
-        otaStatus.lastSuccess = false;
-        otaStatus.lastErrorCode = 0;
-        otaStatus.lastErrorText = "";
-        otaStatus.lastFileName = filename;
-        otaStatus.expectedBytes = req->contentLength();
-        otaStatus.writtenBytes = 0;
-        otaStatus.startedAt = millis();
-
-        Serial.printf("Update: %s (%u bytes)\n", filename.c_str(), req->contentLength());
-        // Disable LEDs during update
-        FastLED.clear(true);
-        uint32_t maxSize = getMaxUpdateSize();
-
-        otaDbg.active = true;
-        otaDbg.pendingInit = true;
-        otaDbg.pendingFinal = false;
-        otaDbg.pendingError = false;
-        otaDbg.cbCount = 0;
-        otaDbg.chunkCount = 0;
-        otaDbg.totalBytes = 0;
-        otaDbg.expectedBytes = req->contentLength();
-        otaDbg.lastIdx = 0;
-        otaDbg.lastLen = 0;
-        otaDbg.lastOffset = 0;
-        otaDbg.lastReqChunk = 0;
-        otaDbg.lastWrote = 0;
-        otaDbg.lastDtUs = 0;
-        otaDbg.maxDtUs = 0;
-        otaDbg.lastHeap = ESP.getFreeHeap();
-        otaDbg.initHeap = otaDbg.lastHeap;
-        otaDbg.maxUpdateSize = maxSize;
-        otaDbg.lastErr = 0;
-        otaDbg.finalOk = false;
-        otaDbg.finalDtMs = 0;
-
-        if (req->contentLength() == 0 || req->contentLength() > maxSize) {
-          otaStatus.lastErrorCode = UPDATE_ERROR_SPACE;
-          otaStatus.lastErrorText = "Firmware size invalid for current OTA partition.";
-          otaDbg.lastErr = otaStatus.lastErrorCode;
-          otaDbg.pendingError = true;
-          otaStatus.inProgress = false;
-          return;
-        }
-
         Update.runAsync(true);
-
+        uint32_t maxSize = getMaxUpdateSize();
         if (!Update.begin(maxSize, U_FLASH)) {
-          otaStatus.lastErrorCode = Update.getError();
-          otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-          otaDbg.lastErr = otaStatus.lastErrorCode;
-          otaDbg.pendingError = true;
+          Serial.println("[OTA] Update begin failed");
+          return;
         }
+        Serial.print("[OTA] Updating: ");
+        Serial.println(filename);
       }
-      if (!Update.hasError()) {
-        static uint32_t cbCounter = 0;
-        static uint32_t chunkCounter = 0;
-        cbCounter++;
-        otaDbg.cbCount = cbCounter;
-        otaDbg.lastIdx = index;
-        otaDbg.lastLen = len;
-        otaDbg.lastHeap = ESP.getFreeHeap();
-
-        size_t written = 0;
-        const size_t CHUNK_SIZE = 32;
-        
-        while (written < len && !Update.hasError()) {
-          size_t chunk = min((size_t)(len - written), CHUNK_SIZE);
-          uint32_t tStartUs = micros();
-          size_t result = Update.write(data + written, chunk);
-          uint32_t dtUs = micros() - tStartUs;
-          chunkCounter++;
-          otaDbg.chunkCount = chunkCounter;
-          otaDbg.lastOffset = index + written;
-          otaDbg.lastReqChunk = chunk;
-          otaDbg.lastWrote = result;
-          otaDbg.lastDtUs = dtUs;
-          if (dtUs > otaDbg.maxDtUs) {
-            otaDbg.maxDtUs = dtUs;
-          }
-          otaDbg.lastErr = Update.getError();
-          otaDbg.lastHeap = ESP.getFreeHeap();
-          otaDbg.totalBytes = index + written + result;
-
-          if (result != chunk) {
-            otaStatus.lastErrorCode = Update.getError();
-            otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-            otaDbg.lastErr = otaStatus.lastErrorCode;
-            otaDbg.pendingError = true;
-            break;
-          }
-          written += chunk;
-          ESP.wdtFeed();
-        }
-        
-        if (written == len) {
-          otaStatus.writtenBytes = index + len;
-          otaDbg.totalBytes = otaStatus.writtenBytes;
-        }
+      
+      if (Update.write(data, len) == len) {} else {
+        Update.printError(Serial);
       }
+      
       if (final) {
-        // Finalize using actual written size; begin() was called with max OTA partition size
-        // so end(true) is required to close successfully at current progress.
-        uint32_t endStartMs = millis();
-        bool endOk = Update.end(true);
-        uint32_t endDtMs = millis() - endStartMs;
-        otaDbg.finalOk = endOk;
-        otaDbg.finalDtMs = endDtMs;
-        otaDbg.lastErr = Update.getError();
-        otaDbg.lastHeap = ESP.getFreeHeap();
-        otaDbg.pendingFinal = true;
-
-        if (endOk) {
-          size_t finalBytes = index + len;
-          otaStatus.writtenBytes = finalBytes;
-          otaStatus.expectedBytes = finalBytes;
-          otaDbg.totalBytes = finalBytes;
-          otaDbg.expectedBytes = finalBytes;
-          otaVisualActive = false;
-          otaStatus.lastSuccess = true;
-          otaStatus.finishedAt = millis();
-          Update.runAsync(false);
+        if (Update.end(true)) {
+          Serial.println("\n[OTA] Update Success!");
         } else {
-          otaStatus.lastErrorCode = Update.getError();
-          otaStatus.lastErrorText = updateErrorToString(otaStatus.lastErrorCode);
-          otaDbg.lastErr = otaStatus.lastErrorCode;
-          otaDbg.pendingError = true;
-          otaVisualActive = false;
-          otaStatus.inProgress = false;
-          Update.runAsync(false);
+          Serial.println("\n[OTA] Update Failed!");
+          Update.printError(Serial);
         }
       }
     }
   );
-
-  // ── Catch-all for captive portal ──
+  
+  // Catchall
   server.onNotFound([](AsyncWebServerRequest *req) {
-    req->redirect(getCaptivePortalUrl());
+    req->redirect("http://" + WiFi.softAPIP().toString() + "/");
   });
-
+  
   server.begin();
-  Serial.println("HTTP server started");
+  Serial.println("[Web] Server started @ http://192.168.4.1");
+}
+
+void setupWiFi() {
+  Serial.println("[WiFi] Starting AP+STA mode...");
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi.beginSmartConfig();
+  Serial.println("[WiFi] AP: " + String(AP_SSID));
+  Serial.println("[WiFi] AP IP: " + WiFi.softAPIP().toString());
+  
+  // Try to auto-connect to previously saved network
+  WiFi.begin();
+}
+
+void setupDNS() {
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  Serial.println("[DNS] Captive portal ready");
+}
+
+void setupOTA() {
+  ArduinoOTA.setPassword(OTA_PASS);
+  ArduinoOTA.begin();
+  Serial.println("[OTA] Ready");
+}
+
+// ============================================================================
+// Main Setup & Loop
+// ============================================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("\n\n");
+  Serial.println("  ESP8266 LED Strip Clock v" + String(FW_VERSION_BASE) + " (" + FW_BUILD_TIME + ")");
+  Serial.println("  60-LED NeoPixel Clock with NTP Sync");
+  Serial.println("\n");
+  
+  setupLEDs();
+  loadEEPROMSettings();
+  setupWiFi();
+  setupDNS();
+  setupOTA();
+  setupWebServer();
+  
+  WiFi.scanNetworks(true, true);  // Start first scan
+  
+  Serial.println("[READY] Access point: " + String(AP_SSID));
+  Serial.println("[READY] Open browser: http://192.168.4.1\n");
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  if (mdnsStarted) {
+    MDNS.update();
+  } else if (WiFi.status() == WL_CONNECTED && !mdnsStarted) {
+    MDNS.begin("ledclock");
+    mdnsStarted = true;
+    Serial.println("[mDNS] Available at http://ledclock.local");
+  }
+  
+  checkWiFi();
+  updateWiFiConnect();
+  ArduinoOTA.handle();
+  
+  // Trigger NTP sync after WiFi connects
+  if (wifiConnected && millis() - lastNtpSync > 3600000) {
+    syncTimeNTP();
+  }
+  
+  // Refresh timezone daily if auto-detected
+  if (wifiConnected && tz.autoDetected && millis() - lastTzCheck > 86400000) {
+    detectTimezone();
+  }
+  
+  // Update LED clock display
+  displayClock();
+  
+  delay(100);
 }
