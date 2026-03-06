@@ -31,9 +31,10 @@ Per-mode config fields:
 - **Minute color**: `minute.r`, `minute.g`, `minute.b` (0..255)
 - **Second color**: `second.r`, `second.g`, `second.b` (0..255)
 - **Widths (radius)**:
-  - `width.hour` (0..10)
-  - `width.minute` (0..10)
-  - `width.second` (0..12)
+- **Widths (pixel count)**:
+  - `width.hour` (1..21)
+  - `width.minute` (1..21)
+  - `width.second` (1..30)
 - **Spectrum mode**:
   - `0` = static
   - `1` = rainbow blend
@@ -79,8 +80,10 @@ Response includes the final stored config for that mode.
 `/settings.html` now includes per-mode HMS controls:
 - Hour / Minute / Second color pickers
 - Hour / Minute / Second width sliders
+- Width is pixel count (not radius)
 - Spectrum select (Static / Rainbow blend / Pulse glow)
 - Save button: **Save Mode Visuals**
+- Any color/width/spectrum slider change is auto-applied live and persisted
 
 Behavior:
 - Changing display mode loads that mode’s stored HMS profile.
@@ -91,9 +94,10 @@ Behavior:
 ## Definitions
 
 - **HMS marker**: Hour / Minute / Second indicator drawn on the ring.
-- **Width**: Marker radius around its center position.
-  - Width `0` = center LED only.
-  - Width `1` = 3 LEDs (`-1..+1`), etc.
+- **Width**: Exact number of pixels for the marker body, centered on the time position.
+  - Width `1` = 1 pixel.
+  - Width `3` = 3 centered pixels.
+  - Width `5` = 5 centered pixels.
 - **Spectrum**: Dynamic color modulation on top of base color.
 
 ---

@@ -265,29 +265,29 @@ ModeDisplayConfig defaultModeConfigFor(uint8_t mode) {
     255, 0, 0,
     0, 255, 0,
     0, 0, 255,
-    2,
-    1,
-    1,
+    5,
+    3,
+    3,
     0
   };
 
   if (mode == DISPLAY_SIMPLE) {
-    cfg.hourWidth = 1;
-    cfg.minuteWidth = 1;
-    cfg.secondWidth = 1;
-  } else if (mode == DISPLAY_COMET) {
     cfg.hourWidth = 3;
-    cfg.minuteWidth = 2;
-    cfg.secondWidth = 4;
+    cfg.minuteWidth = 3;
+    cfg.secondWidth = 3;
+  } else if (mode == DISPLAY_COMET) {
+    cfg.hourWidth = 7;
+    cfg.minuteWidth = 5;
+    cfg.secondWidth = 10;
     cfg.spectrum = 1;
   } else if (mode == DISPLAY_PASTEL) {
     cfg = {
       190, 95, 150,
       110, 210, 170,
       110, 170, 220,
-      1,
-      1,
-      1,
+      3,
+      3,
+      3,
       0
     };
   } else if (mode == DISPLAY_NEON) {
@@ -295,9 +295,9 @@ ModeDisplayConfig defaultModeConfigFor(uint8_t mode) {
       255, 0, 220,
       0, 255, 220,
       255, 255, 0,
-      1,
-      1,
-      1,
+      3,
+      3,
+      3,
       2
     };
   }
@@ -312,7 +312,9 @@ void setDefaultModeConfigs() {
 }
 
 bool isModeConfigValid(const ModeDisplayConfig &cfg) {
-  if (cfg.hourWidth > 10 || cfg.minuteWidth > 10 || cfg.secondWidth > 12) return false;
+  if (cfg.hourWidth < 1 || cfg.hourWidth > 21) return false;
+  if (cfg.minuteWidth < 1 || cfg.minuteWidth > 21) return false;
+  if (cfg.secondWidth < 1 || cfg.secondWidth > 30) return false;
   if (cfg.spectrum > 2) return false;
   return true;
 }
@@ -330,35 +332,36 @@ void overlayTimeMarkers(int hour12, int minute, int second, const ModeDisplayCon
   int minutePos = minute % NUM_LEDS;
   int secondPos = second % NUM_LEDS;
 
-  int hRadius = (int)cfg.hourWidth;
-  int mRadius = (int)cfg.minuteWidth;
-  int sRadius = (int)cfg.secondWidth;
+  int hCount = max(1, (int)cfg.hourWidth);
+  int mCount = max(1, (int)cfg.minuteWidth);
+  int sCount = max(1, (int)cfg.secondWidth);
 
-  for (int i = -hRadius; i <= hRadius; i++) {
-    int dist = abs(i);
-    uint8_t level = (dist == 0) ? 255 : (uint8_t)(255 - min(200, dist * 70));
-    CRGB hc = blendSpectrumColor(CRGB{cfg.hourR, cfg.hourG, cfg.hourB}, cfg.spectrum, level, (uint16_t)(40 + dist * 25));
-    addPixelWrap(hourPos + i, hc.r, hc.g, hc.b);
-  }
+  auto drawCenteredMarker = [&](int centerPos, int pixelCount, CRGB base, uint16_t seedBase) {
+    int centerIdx = pixelCount / 2;
+    int maxDist = max(centerIdx, pixelCount - 1 - centerIdx);
+    for (int j = 0; j < pixelCount; j++) {
+      int offset = j - centerIdx;
+      int dist = abs(offset);
+      uint8_t level = 255;
+      if (maxDist > 0) {
+        level = (uint8_t)(255 - (dist * 190 / maxDist));
+      }
+      CRGB col = blendSpectrumColor(base, cfg.spectrum, level, (uint16_t)(seedBase + j * 19));
+      addPixelWrap(centerPos + offset, col.r, col.g, col.b);
+    }
+  };
 
-  for (int i = -mRadius; i <= mRadius; i++) {
-    int dist = abs(i);
-    uint8_t level = (dist == 0) ? 255 : (uint8_t)(255 - min(190, dist * 80));
-    CRGB mc = blendSpectrumColor(CRGB{cfg.minuteR, cfg.minuteG, cfg.minuteB}, cfg.spectrum, level, (uint16_t)(120 + dist * 31));
-    addPixelWrap(minutePos + i, mc.r, mc.g, mc.b);
-  }
+  drawCenteredMarker(hourPos, hCount, CRGB{cfg.hourR, cfg.hourG, cfg.hourB}, 40);
+  drawCenteredMarker(minutePos, mCount, CRGB{cfg.minuteR, cfg.minuteG, cfg.minuteB}, 120);
+  drawCenteredMarker(secondPos, sCount, CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, 220);
 
-  int tail = max(1, secTrailLen + sRadius);
+  int tail = max(0, secTrailLen);
+  int tailStart = (sCount / 2) + 1;
   for (int i = 0; i < tail; i++) {
-    uint8_t level = (uint8_t)(255 - (i * 220 / tail));
-    CRGB sc = blendSpectrumColor(CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, cfg.spectrum, level, (uint16_t)(220 + i * 17));
-    addPixelWrap(secondPos - i, sc.r, sc.g, sc.b);
-  }
-
-  for (int i = 1; i <= sRadius; i++) {
-    uint8_t level = (uint8_t)(255 - min(200, i * 75));
-    CRGB sc = blendSpectrumColor(CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, cfg.spectrum, level, (uint16_t)(260 + i * 29));
-    addPixelWrap(secondPos + i, sc.r, sc.g, sc.b);
+    int dist = tailStart + i;
+    uint8_t level = (uint8_t)(220 - ((i + 1) * 200 / (tail + 1)));
+    CRGB sc = blendSpectrumColor(CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, cfg.spectrum, level, (uint16_t)(260 + (i + 1) * 17));
+    addPixelWrap(secondPos - dist, sc.r, sc.g, sc.b);
   }
 }
 
@@ -368,7 +371,7 @@ void displayMode_Simple() {
   const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_SIMPLE];
 
   memset(leds, 0, sizeof(leds));
-  overlayTimeMarkers(hour12, minute, second, cfg, 1);
+  overlayTimeMarkers(hour12, minute, second, cfg, 0);
   applyBrightnessAndShow();
 }
 
@@ -1108,16 +1111,16 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <label>Second Color</label><input type='color' id='secondColor' value='#0000ff' style='width:100%;height:36px;border:1px solid #ddd;border-radius:4px'/>
 </div>
 <div class='form-group'>
-<label>Hour Width</label><input type='range' id='hourWidth' min='0' max='10' value='2' style='width:100%'/>
-<div style='font-size:10px;color:#777'>Radius: <span id='hourWidthLabel'>2</span></div>
+<label>Hour Width (pixels)</label><input type='range' id='hourWidth' min='1' max='21' value='5' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Pixels: <span id='hourWidthLabel'>5</span></div>
 </div>
 <div class='form-group'>
-<label>Minute Width</label><input type='range' id='minuteWidth' min='0' max='10' value='1' style='width:100%'/>
-<div style='font-size:10px;color:#777'>Radius: <span id='minuteWidthLabel'>1</span></div>
+<label>Minute Width (pixels)</label><input type='range' id='minuteWidth' min='1' max='21' value='3' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Pixels: <span id='minuteWidthLabel'>3</span></div>
 </div>
 <div class='form-group'>
-<label>Second Width</label><input type='range' id='secondWidth' min='0' max='12' value='1' style='width:100%'/>
-<div style='font-size:10px;color:#777'>Radius: <span id='secondWidthLabel'>1</span></div>
+<label>Second Width (pixels)</label><input type='range' id='secondWidth' min='1' max='30' value='3' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Pixels: <span id='secondWidthLabel'>3</span></div>
 </div>
 <div class='form-group'>
 <label>Color Spectrum</label>
@@ -1170,6 +1173,7 @@ Offset: <span id='tzOffset'>0</span>h (<span id='tzOffsetSec'>0</span>s) | Auto-
 <script>
 let fwFile=null,uploading=false;function updateBrightnessLabel(){const v=document.getElementById('brightness').value;
 document.getElementById('brightValue').textContent=v;document.getElementById('brightLabel').textContent=(Math.round(v/255*100))+'%';}
+let modeCfgSaveTimer=null,modeCfgPersistTimer=null;
 function toggleTzMode(){document.getElementById('manualTz').style.display=document.querySelector('input[name="tzmode"]:checked').value==='manual'?'block':'none';}
 function fileSelected(input){const sb=document.getElementById('statusMsg');const ub=document.getElementById('uploadBtn');fwFile=null;ub.disabled=true;
 if(input.files.length===0)return;fwFile=input.files[0];document.getElementById('fileName').textContent='📄 '+fwFile.name;sb.textContent='Checking firmware...';sb.className='status-msg status-info';
@@ -1215,8 +1219,8 @@ document.getElementById('minuteWidth').value=c.width.minute;
 document.getElementById('secondWidth').value=c.width.second;
 document.getElementById('spectrum').value=c.spectrum;updateWidthLabels();}
 function loadModeConfig(){const m=document.getElementById('displayMode').value;
-fetch('/api/display/config?mode='+m).then(r=>r.json()).then(d=>{if(d&&d.ok)applyModeCfgToControls(d);}).catch(e=>console.warn(e));}
-function saveModeConfig(){const m=document.getElementById('displayMode').value;
+fetch('/api/mode/config?mode='+m).then(r=>r.json()).then(d=>{if(d&&d.ok)applyModeCfgToControls(d);}).catch(e=>console.warn(e));}
+function buildModeCfgQuery(persist){const m=document.getElementById('displayMode').value;
 const h=hexToRgb(document.getElementById('hourColor').value);
 const mn=hexToRgb(document.getElementById('minuteColor').value);
 const s=hexToRgb(document.getElementById('secondColor').value);
@@ -1224,15 +1228,23 @@ const hw=document.getElementById('hourWidth').value;
 const mw=document.getElementById('minuteWidth').value;
 const sw=document.getElementById('secondWidth').value;
 const sp=document.getElementById('spectrum').value;
+return `/api/mode/config?set=1&persist=${persist?1:0}&mode=${m}&hr=${h.r}&hg=${h.g}&hb=${h.b}&mr=${mn.r}&mg=${mn.g}&mb=${mn.b}&sr=${s.r}&sg=${s.g}&sb=${s.b}&hw=${hw}&mw=${mw}&sw=${sw}&sp=${sp}`;}
+function queueModeConfigSave(){updateWidthLabels();
+if(modeCfgSaveTimer)clearTimeout(modeCfgSaveTimer);
+modeCfgSaveTimer=setTimeout(()=>saveModeConfig(true,false),100);
+if(modeCfgPersistTimer)clearTimeout(modeCfgPersistTimer);
+modeCfgPersistTimer=setTimeout(()=>saveModeConfig(true,true),1200);
+}
+function saveModeConfig(silent=false,persist=true){
 const msg=document.getElementById('modeCfgMsg');
-msg.textContent='Saving mode visuals...';msg.className='status-msg status-info';
-const q=`/api/display/config?set=1&mode=${m}&hr=${h.r}&hg=${h.g}&hb=${h.b}&mr=${mn.r}&mg=${mn.g}&mb=${mn.b}&sr=${s.r}&sg=${s.g}&sb=${s.b}&hw=${hw}&mw=${mw}&sw=${sw}&sp=${sp}`;
-fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){msg.textContent='✓ Mode visuals saved';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='✗ '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
+if(!silent){msg.textContent=persist?'Saving mode visuals...':'Applying mode visuals...';msg.className='status-msg status-info';}
+const q=buildModeCfgQuery(persist);
+fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){if(!silent){msg.textContent='✓ Mode visuals saved';msg.className='status-msg status-ok';}applyModeCfgToControls(d);}else{msg.textContent='✗ '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
 .catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
 function resetModeConfig(){const m=document.getElementById('displayMode').value;
 const msg=document.getElementById('modeCfgMsg');
 msg.textContent='Resetting mode visuals...';msg.className='status-msg status-info';
-fetch('/api/display/config?reset=1&mode='+m).then(r=>r.json()).then(d=>{
+fetch('/api/mode/config?reset=1&persist=1&mode='+m).then(r=>r.json()).then(d=>{
 if(d&&d.ok){msg.textContent='✓ Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='✗ '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
 }).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
 function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();loadModeConfig();}
@@ -1273,6 +1285,20 @@ function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.g
 document.getElementById('hourWidth').addEventListener('input',updateWidthLabels);
 document.getElementById('minuteWidth').addEventListener('input',updateWidthLabels);
 document.getElementById('secondWidth').addEventListener('input',updateWidthLabels);
+document.getElementById('hourColor').addEventListener('input',queueModeConfigSave);
+document.getElementById('minuteColor').addEventListener('input',queueModeConfigSave);
+document.getElementById('secondColor').addEventListener('input',queueModeConfigSave);
+document.getElementById('hourWidth').addEventListener('input',queueModeConfigSave);
+document.getElementById('minuteWidth').addEventListener('input',queueModeConfigSave);
+document.getElementById('secondWidth').addEventListener('input',queueModeConfigSave);
+document.getElementById('spectrum').addEventListener('change',queueModeConfigSave);
+document.getElementById('hourColor').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('minuteColor').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('secondColor').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('hourWidth').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('minuteWidth').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('secondWidth').addEventListener('change',()=>saveModeConfig(true,true));
+document.getElementById('spectrum').addEventListener('change',()=>saveModeConfig(true,true));
 pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);updateModeDescription();loadModeConfig();updateWidthLabels();
 </script></body></html>
 )html";
@@ -1442,7 +1468,7 @@ void setupWebServer() {
   });
 
   // API: Display Mode Configuration (per mode, persistent)
-  server.on("/api/display/config", HTTP_GET, [](AsyncWebServerRequest *req) {
+  server.on("/api/mode/config", HTTP_GET, [](AsyncWebServerRequest *req) {
     DynamicJsonDocument doc(512);
 
     int mode = (int)displayMode;
@@ -1459,9 +1485,11 @@ void setupWebServer() {
       return;
     }
 
+    bool shouldPersist = false;
+
     if (req->hasParam("reset")) {
       modeConfigs[mode] = defaultModeConfigFor((uint8_t)mode);
-      saveModeConfigToEEPROM((uint8_t)mode);
+      shouldPersist = true;
       doc["reset"] = true;
     }
 
@@ -1478,8 +1506,8 @@ void setupWebServer() {
       auto parseWidth = [&](const char* key, uint8_t currentValue) -> uint8_t {
         if (!req->hasParam(key)) return currentValue;
         int v = atoi(req->getParam(key)->value().c_str());
-        if (v < 0) v = 0;
-        if (v > 12) v = 12;
+        if (v < 1) v = 1;
+        if (v > 30) v = 30;
         return (uint8_t)v;
       };
 
@@ -1507,8 +1535,15 @@ void setupWebServer() {
       }
 
       modeConfigs[mode] = cfg;
-      saveModeConfigToEEPROM((uint8_t)mode);
+      int persistFlag = req->hasParam("persist") ? atoi(req->getParam("persist")->value().c_str()) : 1;
+      if (persistFlag != 0) shouldPersist = true;
       doc["saved"] = true;
+      doc["persisted"] = (persistFlag != 0);
+    }
+
+    if (shouldPersist) {
+      saveModeConfigToEEPROM((uint8_t)mode);
+      doc["persisted"] = true;
     }
 
     const ModeDisplayConfig &cfg = modeConfigs[mode];
