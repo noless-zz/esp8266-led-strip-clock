@@ -57,6 +57,9 @@ const int EEPROM_PASS_ADDR = 65;
 const int EEPROM_BRIGHTNESS_ADDR = 129;
 const int EEPROM_TZ_OFFSET_ADDR = 130;
 const int EEPROM_DISPLAY_MODE_ADDR = 134;
+const int EEPROM_MODE_CFG_MAGIC_ADDR = 135;
+const int EEPROM_MODE_CFG_BASE_ADDR = 160;
+const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
 const uint8_t EEPROM_MAGIC = 0xA7;
 const int MAX_SSID_LEN = 32;
 const int MAX_PASS_LEN = 64;
@@ -66,6 +69,18 @@ Adafruit_NeoPixel *ledStrip = nullptr;
 uint8_t ledBrightness = 76;  // 30%
 DisplayMode displayMode = DISPLAY_SOLID;
 struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
+
+struct ModeDisplayConfig {
+  uint8_t hourR, hourG, hourB;
+  uint8_t minuteR, minuteG, minuteB;
+  uint8_t secondR, secondG, secondB;
+  uint8_t hourWidth;
+  uint8_t minuteWidth;
+  uint8_t secondWidth;
+  uint8_t spectrum;
+};
+
+ModeDisplayConfig modeConfigs[DISPLAY_MAX];
 
 // Web server
 AsyncWebServer server(80);
@@ -122,15 +137,19 @@ struct {
 } otaStatus;
 
 // Forward declarations for display functions
-void displayMode_ProgressBar();
-void displayMode_PulseDots();
-void displayMode_Gradient();
+void displayMode_Simple();
+void displayMode_Pulse();
+void displayMode_Pastel();
 void displayMode_Binary();
 void displayMode_HourMarker();
-void displayMode_Strobe();
-void displayMode_Rainbow();
+void displayMode_Neon();
+void displayMode_Comet();
 void displayMode_Flame();
 void displayClock_Solid();
+void setDefaultModeConfigs();
+void loadModeConfigsFromEEPROM();
+void saveModeConfigToEEPROM(uint8_t mode);
+void saveDisplayModeToEEPROM();
 
 // ============================================================================
 // LED Functions
@@ -215,61 +234,148 @@ bool extractClock(int &hour12, int &hour24, int &minute, int &second, int &daySe
   return true;
 }
 
-void overlayTimeMarkers(int hour12, int minute, int second, int secTrailLen) {
+CRGB blendSpectrumColor(const CRGB &base, uint8_t spectrum, uint8_t level, uint16_t phaseSeed) {
+  if (spectrum == 0) return base;
+
+  uint8_t rr = base.r;
+  uint8_t gg = base.g;
+  uint8_t bb = base.b;
+
+  if (spectrum == 1) {
+    uint8_t hueR, hueG, hueB;
+    uint16_t hue = (uint16_t)((phaseSeed + millis() / 18) % 360);
+    hsvToRgb(hue, 255, level, hueR, hueG, hueB);
+    rr = addSat(base.r / 2, hueR / 2);
+    gg = addSat(base.g / 2, hueG / 2);
+    bb = addSat(base.b / 2, hueB / 2);
+  } else if (spectrum == 2) {
+    uint8_t tw = (uint8_t)((phaseSeed + (millis() / 24)) % 120);
+    uint8_t swing = tw < 60 ? tw : (119 - tw);
+    uint8_t boost = (uint8_t)(level / 4 + swing);
+    rr = addSat(base.r, boost / 2);
+    gg = addSat(base.g, boost / 3);
+    bb = addSat(base.b, boost / 2);
+  }
+
+  return CRGB{rr, gg, bb};
+}
+
+ModeDisplayConfig defaultModeConfigFor(uint8_t mode) {
+  ModeDisplayConfig cfg = {
+    255, 0, 0,
+    0, 255, 0,
+    0, 0, 255,
+    2,
+    1,
+    1,
+    0
+  };
+
+  if (mode == DISPLAY_SIMPLE) {
+    cfg.hourWidth = 1;
+    cfg.minuteWidth = 1;
+    cfg.secondWidth = 1;
+  } else if (mode == DISPLAY_COMET) {
+    cfg.hourWidth = 3;
+    cfg.minuteWidth = 2;
+    cfg.secondWidth = 4;
+    cfg.spectrum = 1;
+  } else if (mode == DISPLAY_PASTEL) {
+    cfg = {
+      190, 95, 150,
+      110, 210, 170,
+      110, 170, 220,
+      1,
+      1,
+      1,
+      0
+    };
+  } else if (mode == DISPLAY_NEON) {
+    cfg = {
+      255, 0, 220,
+      0, 255, 220,
+      255, 255, 0,
+      1,
+      1,
+      1,
+      2
+    };
+  }
+
+  return cfg;
+}
+
+void setDefaultModeConfigs() {
+  for (int m = 0; m < DISPLAY_MAX; m++) {
+    modeConfigs[m] = defaultModeConfigFor((uint8_t)m);
+  }
+}
+
+bool isModeConfigValid(const ModeDisplayConfig &cfg) {
+  if (cfg.hourWidth > 10 || cfg.minuteWidth > 10 || cfg.secondWidth > 12) return false;
+  if (cfg.spectrum > 2) return false;
+  return true;
+}
+
+void applyModeConfigDefaultsIfInvalid(uint8_t mode) {
+  if (mode >= DISPLAY_MAX) return;
+  if (!isModeConfigValid(modeConfigs[mode])) {
+    setDefaultModeConfigs();
+    return;
+  }
+}
+
+void overlayTimeMarkers(int hour12, int minute, int second, const ModeDisplayConfig &cfg, int secTrailLen) {
   int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
   int minutePos = minute % NUM_LEDS;
   int secondPos = second % NUM_LEDS;
 
-  for (int i = -2; i <= 2; i++) {
-    uint8_t level = (i == 0) ? 255 : ((abs(i) == 1) ? 170 : 90);
-    addPixelWrap(hourPos + i, level, 30, 30);
+  int hRadius = (int)cfg.hourWidth;
+  int mRadius = (int)cfg.minuteWidth;
+  int sRadius = (int)cfg.secondWidth;
+
+  for (int i = -hRadius; i <= hRadius; i++) {
+    int dist = abs(i);
+    uint8_t level = (dist == 0) ? 255 : (uint8_t)(255 - min(200, dist * 70));
+    CRGB hc = blendSpectrumColor(CRGB{cfg.hourR, cfg.hourG, cfg.hourB}, cfg.spectrum, level, (uint16_t)(40 + dist * 25));
+    addPixelWrap(hourPos + i, hc.r, hc.g, hc.b);
   }
 
-  for (int i = -1; i <= 1; i++) {
-    uint8_t level = (i == 0) ? 255 : 120;
-    addPixelWrap(minutePos + i, 30, level, 30);
+  for (int i = -mRadius; i <= mRadius; i++) {
+    int dist = abs(i);
+    uint8_t level = (dist == 0) ? 255 : (uint8_t)(255 - min(190, dist * 80));
+    CRGB mc = blendSpectrumColor(CRGB{cfg.minuteR, cfg.minuteG, cfg.minuteB}, cfg.spectrum, level, (uint16_t)(120 + dist * 31));
+    addPixelWrap(minutePos + i, mc.r, mc.g, mc.b);
   }
 
-  for (int i = 0; i < secTrailLen; i++) {
-    uint8_t level = 255 - (i * 210 / secTrailLen);
-    addPixelWrap(secondPos - i, 30, 60, level);
+  int tail = max(1, secTrailLen + sRadius);
+  for (int i = 0; i < tail; i++) {
+    uint8_t level = (uint8_t)(255 - (i * 220 / tail));
+    CRGB sc = blendSpectrumColor(CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, cfg.spectrum, level, (uint16_t)(220 + i * 17));
+    addPixelWrap(secondPos - i, sc.r, sc.g, sc.b);
+  }
+
+  for (int i = 1; i <= sRadius; i++) {
+    uint8_t level = (uint8_t)(255 - min(200, i * 75));
+    CRGB sc = blendSpectrumColor(CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, cfg.spectrum, level, (uint16_t)(260 + i * 29));
+    addPixelWrap(secondPos + i, sc.r, sc.g, sc.b);
   }
 }
 
 void displayMode_Simple() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_SIMPLE];
 
   memset(leds, 0, sizeof(leds));
-  
-  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
-  int minutePos = minute % NUM_LEDS;
-  int secondPos = second % NUM_LEDS;
-  
-  // Red hour marker (3 LEDs)
-  for (int i = -1; i <= 1; i++) {
-    int idx = (hourPos + i + NUM_LEDS) % NUM_LEDS;
-    leds[idx] = {255, 0, 0};
-  }
-  
-  // Green minute marker (3 LEDs)
-  for (int i = -1; i <= 1; i++) {
-    int idx = (minutePos + i + NUM_LEDS) % NUM_LEDS;
-    leds[idx] = {0, 255, 0};
-  }
-  
-  // Blue second marker (3 LEDs)
-  for (int i = -1; i <= 1; i++) {
-    int idx = (secondPos + i + NUM_LEDS) % NUM_LEDS;
-    leds[idx] = {0, 0, 255};
-  }
-  
+  overlayTimeMarkers(hour12, minute, second, cfg, 1);
   applyBrightnessAndShow();
 }
 
 void displayMode_Pulse() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_PULSE];
 
   memset(leds, 0, sizeof(leds));
   uint32_t ms = millis();
@@ -282,44 +388,24 @@ void displayMode_Pulse() {
   }
 
   // Clear HMS markers with more contrast
-  overlayTimeMarkers(hour12, minute, second, 7);
+  overlayTimeMarkers(hour12, minute, second, cfg, 7);
   applyBrightnessAndShow();
 }
 
 void displayMode_Pastel() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_PASTEL];
 
   memset(leds, 0, sizeof(leds));
-  
-  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
-  int minutePos = minute % NUM_LEDS;
-  int secondPos = second % NUM_LEDS;
-  
-  // Soft pastel hour (pink)
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 180 : 100;
-    addPixelWrap(hourPos + i, brightness, brightness / 3, brightness / 2);
-  }
-  
-  // Soft pastel minute (mint green)
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 160 : 90;
-    addPixelWrap(minutePos + i, brightness / 4, brightness, brightness / 2);
-  }
-  
-  // Soft pastel second (sky blue)
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 180 : 100;
-    addPixelWrap(secondPos + i, brightness / 4, brightness / 2, brightness);
-  }
-  
+  overlayTimeMarkers(hour12, minute, second, cfg, 2);
   applyBrightnessAndShow();
 }
 
 void displayMode_Binary() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_BINARY];
 
   memset(leds, 0, sizeof(leds));
 
@@ -347,12 +433,14 @@ void displayMode_Binary() {
     }
   }
 
+  overlayTimeMarkers(hour12, minute, second, cfg, 1);
   applyBrightnessAndShow();
 }
 
 void displayMode_HourMarker() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_HOUR_MARKER];
 
   memset(leds, 0, sizeof(leds));
 
@@ -361,75 +449,39 @@ void displayMode_HourMarker() {
     leds[i] = {base / 4, base, base / 2};
   }
 
-  overlayTimeMarkers(hour12, minute, second, 9);
+  overlayTimeMarkers(hour12, minute, second, cfg, 9);
   applyBrightnessAndShow();
 }
 
 void displayMode_Neon() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_NEON];
 
   memset(leds, 0, sizeof(leds));
-  
-  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
-  int minutePos = minute % NUM_LEDS;
-  int secondPos = second % NUM_LEDS;
-  
-  // Bright neon magenta hour
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 255 : 160;
-    addPixelWrap(hourPos + i, brightness, 0, brightness);
-  }
-  
-  // Bright neon cyan minute
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 255 : 160;
-    addPixelWrap(minutePos + i, 0, brightness, brightness);
-  }
-  
-  // Bright neon yellow second
-  for (int i = -1; i <= 1; i++) {
-    uint8_t brightness = (i == 0) ? 255 : 160;
-    addPixelWrap(secondPos + i, brightness, brightness, 0);
-  }
-  
+  overlayTimeMarkers(hour12, minute, second, cfg, 2);
   applyBrightnessAndShow();
 }
 
 void displayMode_Comet() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_COMET];
 
   memset(leds, 0, sizeof(leds));
-  
-  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
-  int minutePos = minute % NUM_LEDS;
-  int secondPos = second % NUM_LEDS;
-  
-  // Hour comet trail (red, 7 LEDs long)
-  for (int i = 0; i < 7; i++) {
-    uint8_t fade = 255 - (i * 35);
-    addPixelWrap(hourPos - i, fade, 0, 0);
+  int cometTail = 4 + (int)cfg.secondWidth * 2;
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint8_t dim = (uint8_t)(2 + (i % 7));
+    leds[i] = {dim, dim, dim};
   }
-  
-  // Minute comet trail (green, 5 LEDs long)
-  for (int i = 0; i < 5; i++) {
-    uint8_t fade = 255 - (i * 50);
-    addPixelWrap(minutePos - i, 0, fade, 0);
-  }
-  
-  // Second comet trail (blue, 10 LEDs long with faster fade)
-  for (int i = 0; i < 10; i++) {
-    uint8_t fade = 255 - (i * 25);
-    addPixelWrap(secondPos - i, 0, 0, fade);
-  }
-  
+  overlayTimeMarkers(hour12, minute, second, cfg, cometTail);
   applyBrightnessAndShow();
 }
 
 void displayMode_Flame() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_FLAME];
 
   // Optimize: update flame only every 50ms (20 times/sec instead of 60)
   static uint32_t lastUpdate = 0;
@@ -450,7 +502,7 @@ void displayMode_Flame() {
     }
   }
 
-  overlayTimeMarkers(hour12, minute, second, 9);
+  overlayTimeMarkers(hour12, minute, second, cfg, 9);
   applyBrightnessAndShow();
 }
 
@@ -491,6 +543,7 @@ void displayClock() {
 void displayClock_Solid() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
+  const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_SOLID];
 
   memset(leds, 0, sizeof(leds));
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -499,7 +552,7 @@ void displayClock_Solid() {
     leds[i] = {r, g, b};
   }
 
-  overlayTimeMarkers(hour12, minute, second, 9);
+  overlayTimeMarkers(hour12, minute, second, cfg, 9);
   applyBrightnessAndShow();
 }
 
@@ -507,12 +560,56 @@ void displayClock_Solid() {
 // EEPROM Functions
 // ============================================================================
 
+void saveDisplayModeToEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_DISPLAY_MODE_ADDR, (uint8_t)displayMode);
+  EEPROM.commit();
+}
+
+void saveModeConfigToEEPROM(uint8_t mode) {
+  if (mode >= DISPLAY_MAX) return;
+  int addr = EEPROM_MODE_CFG_BASE_ADDR + (int)mode * (int)sizeof(ModeDisplayConfig);
+  EEPROM.begin(EEPROM_SIZE);
+  const uint8_t *raw = reinterpret_cast<const uint8_t*>(&modeConfigs[mode]);
+  for (unsigned int i = 0; i < sizeof(ModeDisplayConfig); i++) {
+    EEPROM.write(addr + (int)i, raw[i]);
+  }
+  EEPROM.write(EEPROM_MODE_CFG_MAGIC_ADDR, EEPROM_MODE_CFG_MAGIC);
+  EEPROM.commit();
+}
+
+void loadModeConfigsFromEEPROM() {
+  setDefaultModeConfigs();
+  EEPROM.begin(EEPROM_SIZE);
+
+  if (EEPROM.read(EEPROM_MODE_CFG_MAGIC_ADDR) != EEPROM_MODE_CFG_MAGIC) {
+    for (uint8_t m = 0; m < DISPLAY_MAX; m++) {
+      saveModeConfigToEEPROM(m);
+    }
+    return;
+  }
+
+  for (uint8_t m = 0; m < DISPLAY_MAX; m++) {
+    int addr = EEPROM_MODE_CFG_BASE_ADDR + (int)m * (int)sizeof(ModeDisplayConfig);
+    ModeDisplayConfig loaded;
+    uint8_t *raw = reinterpret_cast<uint8_t*>(&loaded);
+    for (unsigned int i = 0; i < sizeof(ModeDisplayConfig); i++) {
+      raw[i] = EEPROM.read(addr + (int)i);
+    }
+    if (isModeConfigValid(loaded)) {
+      modeConfigs[m] = loaded;
+    }
+  }
+}
+
 void loadEEPROMSettings() {
   EEPROM.begin(EEPROM_SIZE);
   uint8_t magic = EEPROM.read(EEPROM_MAGIC_ADDR);
   if (magic != EEPROM_MAGIC) {
     EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+    EEPROM.write(EEPROM_DISPLAY_MODE_ADDR, (uint8_t)displayMode);
     EEPROM.commit();
+    loadModeConfigsFromEEPROM();
     Serial.println("[EEPROM] Initialized new settings");
     return;
   }
@@ -549,6 +646,8 @@ void loadEEPROMSettings() {
   // Load display mode
   uint8_t mode = EEPROM.read(EEPROM_DISPLAY_MODE_ADDR);
   if (mode < DISPLAY_MAX) displayMode = (DisplayMode)mode;
+
+  loadModeConfigsFromEEPROM();
 }
 
 void saveEEPROMSettings(const String& ssid, const String& pass) {
@@ -999,6 +1098,38 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 </select></div>
 <div style='font-size:11px;color:#888;margin-top:5px' id='modeDesc'>Choose a display mode</div>
 <button class='btn btn-secondary' onclick='updateModeDescription()'>Refresh Display</button>
+<div class='form-group' style='margin-top:12px'>
+<label>Hour Color</label><input type='color' id='hourColor' value='#ff0000' style='width:100%;height:36px;border:1px solid #ddd;border-radius:4px'/>
+</div>
+<div class='form-group'>
+<label>Minute Color</label><input type='color' id='minuteColor' value='#00ff00' style='width:100%;height:36px;border:1px solid #ddd;border-radius:4px'/>
+</div>
+<div class='form-group'>
+<label>Second Color</label><input type='color' id='secondColor' value='#0000ff' style='width:100%;height:36px;border:1px solid #ddd;border-radius:4px'/>
+</div>
+<div class='form-group'>
+<label>Hour Width</label><input type='range' id='hourWidth' min='0' max='10' value='2' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Radius: <span id='hourWidthLabel'>2</span></div>
+</div>
+<div class='form-group'>
+<label>Minute Width</label><input type='range' id='minuteWidth' min='0' max='10' value='1' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Radius: <span id='minuteWidthLabel'>1</span></div>
+</div>
+<div class='form-group'>
+<label>Second Width</label><input type='range' id='secondWidth' min='0' max='12' value='1' style='width:100%'/>
+<div style='font-size:10px;color:#777'>Radius: <span id='secondWidthLabel'>1</span></div>
+</div>
+<div class='form-group'>
+<label>Color Spectrum</label>
+<select id='spectrum' style='width:100%;padding:8px;border:1px solid #ddd;border-radius:4px'>
+<option value='0'>Static</option>
+<option value='1'>Rainbow blend</option>
+<option value='2'>Pulse glow</option>
+</select>
+</div>
+<button class='btn btn-secondary' onclick='saveModeConfig()'>Save Mode Visuals</button>
+<button class='btn btn-secondary' onclick='resetModeConfig()' style='margin-top:8px;background:#f8f8f8;border:1px solid #ddd;color:#555'>Reset Current Mode to Default</button>
+<div class='status-msg' id='modeCfgMsg'></div>
 </div>
 
 <div class='card'><h2>Brightness</h2>
@@ -1070,7 +1201,41 @@ function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:che
 const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
 fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='✓ Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='✗ Error: '+e;b.className='status-msg status-err';});}
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
-function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();}
+function rgbToHex(r,g,b){return'#'+[r,g,b].map(v=>{const h=Number(v).toString(16);return h.length===1?'0'+h:h;}).join('');}
+function hexToRgb(hex){const v=(hex||'#000000').replace('#','');if(v.length!==6)return{r:0,g:0,b:0};return{r:parseInt(v.substring(0,2),16),g:parseInt(v.substring(2,4),16),b:parseInt(v.substring(4,6),16)};}
+function updateWidthLabels(){document.getElementById('hourWidthLabel').textContent=document.getElementById('hourWidth').value;
+document.getElementById('minuteWidthLabel').textContent=document.getElementById('minuteWidth').value;
+document.getElementById('secondWidthLabel').textContent=document.getElementById('secondWidth').value;}
+function applyModeCfgToControls(c){if(!c)return;
+document.getElementById('hourColor').value=rgbToHex(c.hour.r,c.hour.g,c.hour.b);
+document.getElementById('minuteColor').value=rgbToHex(c.minute.r,c.minute.g,c.minute.b);
+document.getElementById('secondColor').value=rgbToHex(c.second.r,c.second.g,c.second.b);
+document.getElementById('hourWidth').value=c.width.hour;
+document.getElementById('minuteWidth').value=c.width.minute;
+document.getElementById('secondWidth').value=c.width.second;
+document.getElementById('spectrum').value=c.spectrum;updateWidthLabels();}
+function loadModeConfig(){const m=document.getElementById('displayMode').value;
+fetch('/api/display/config?mode='+m).then(r=>r.json()).then(d=>{if(d&&d.ok)applyModeCfgToControls(d);}).catch(e=>console.warn(e));}
+function saveModeConfig(){const m=document.getElementById('displayMode').value;
+const h=hexToRgb(document.getElementById('hourColor').value);
+const mn=hexToRgb(document.getElementById('minuteColor').value);
+const s=hexToRgb(document.getElementById('secondColor').value);
+const hw=document.getElementById('hourWidth').value;
+const mw=document.getElementById('minuteWidth').value;
+const sw=document.getElementById('secondWidth').value;
+const sp=document.getElementById('spectrum').value;
+const msg=document.getElementById('modeCfgMsg');
+msg.textContent='Saving mode visuals...';msg.className='status-msg status-info';
+const q=`/api/display/config?set=1&mode=${m}&hr=${h.r}&hg=${h.g}&hb=${h.b}&mr=${mn.r}&mg=${mn.g}&mb=${mn.b}&sr=${s.r}&sg=${s.g}&sb=${s.b}&hw=${hw}&mw=${mw}&sw=${sw}&sp=${sp}`;
+fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){msg.textContent='✓ Mode visuals saved';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='✗ '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
+.catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
+function resetModeConfig(){const m=document.getElementById('displayMode').value;
+const msg=document.getElementById('modeCfgMsg');
+msg.textContent='Resetting mode visuals...';msg.className='status-msg status-info';
+fetch('/api/display/config?reset=1&mode='+m).then(r=>r.json()).then(d=>{
+if(d&&d.ok){msg.textContent='✓ Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='✗ '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
+}).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
+function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();loadModeConfig();}
 function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
 const desc={0:'Rainbow orbit background with clear red hour, green minute, and blue second markers (5-3-7 LED spread).',
 1:'Minimal clean mode: exactly 3 LEDs each for red hour, green minute, blue second. No background.',
@@ -1096,10 +1261,19 @@ document.getElementById('tzAuto').textContent=d.timezone_auto_detected?'yes':'no
 document.getElementById('tzDetectStatus').textContent=d.tz_detect_status||'-';
 document.getElementById('tzDetectMsg').textContent=d.tz_detect_message||'-';
 document.getElementById('tzDebug').style.display='block';
-if(d.display_mode!==undefined){document.getElementById('displayMode').value=d.display_mode;updateModeDescription();}
+if(d.display_mode!==undefined){
+const current=document.getElementById('displayMode').value;
+document.getElementById('displayMode').value=d.display_mode;
+updateModeDescription();
+if(String(current)!==String(d.display_mode)){loadModeConfig();}
+}
+if(d.display_cfg){applyModeCfgToControls(d.display_cfg);}
 }).catch(e=>console.warn(e));}
 function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
-pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);updateModeDescription();
+document.getElementById('hourWidth').addEventListener('input',updateWidthLabels);
+document.getElementById('minuteWidth').addEventListener('input',updateWidthLabels);
+document.getElementById('secondWidth').addEventListener('input',updateWidthLabels);
+pollStatus();getMaxSize();scanWifi();setInterval(pollStatus,5000);updateModeDescription();loadModeConfig();updateWidthLabels();
 </script></body></html>
 )html";
 
@@ -1147,6 +1321,20 @@ void setupWebServer() {
     doc["tz_detect_response_sample"] = tzDiag.responseSample;
     doc["brightness"] = (ledBrightness * 100) / 255;
     doc["display_mode"] = (int)displayMode;
+    const ModeDisplayConfig &cfg = modeConfigs[(int)displayMode];
+    doc["display_cfg"]["hour"]["r"] = cfg.hourR;
+    doc["display_cfg"]["hour"]["g"] = cfg.hourG;
+    doc["display_cfg"]["hour"]["b"] = cfg.hourB;
+    doc["display_cfg"]["minute"]["r"] = cfg.minuteR;
+    doc["display_cfg"]["minute"]["g"] = cfg.minuteG;
+    doc["display_cfg"]["minute"]["b"] = cfg.minuteB;
+    doc["display_cfg"]["second"]["r"] = cfg.secondR;
+    doc["display_cfg"]["second"]["g"] = cfg.secondG;
+    doc["display_cfg"]["second"]["b"] = cfg.secondB;
+    doc["display_cfg"]["width"]["hour"] = cfg.hourWidth;
+    doc["display_cfg"]["width"]["minute"] = cfg.minuteWidth;
+    doc["display_cfg"]["width"]["second"] = cfg.secondWidth;
+    doc["display_cfg"]["spectrum"] = cfg.spectrum;
     doc["ip"] = wifiConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     doc["heap"] = ESP.getFreeHeap();
     String json;
@@ -1225,16 +1413,124 @@ void setupWebServer() {
       int newMode = atoi(req->getParam("mode")->value().c_str());
       if (newMode >= 0 && newMode < DISPLAY_MAX) {
         displayMode = (DisplayMode)newMode;
+        saveDisplayModeToEEPROM();
         doc["changed"] = true;
         doc["new_mode"] = displayMode;
       } else {
         doc["error"] = "Invalid mode";
       }
     }
+
+    const ModeDisplayConfig &cfg = modeConfigs[(int)displayMode];
+    doc["config"]["hour"]["r"] = cfg.hourR;
+    doc["config"]["hour"]["g"] = cfg.hourG;
+    doc["config"]["hour"]["b"] = cfg.hourB;
+    doc["config"]["minute"]["r"] = cfg.minuteR;
+    doc["config"]["minute"]["g"] = cfg.minuteG;
+    doc["config"]["minute"]["b"] = cfg.minuteB;
+    doc["config"]["second"]["r"] = cfg.secondR;
+    doc["config"]["second"]["g"] = cfg.secondG;
+    doc["config"]["second"]["b"] = cfg.secondB;
+    doc["config"]["width"]["hour"] = cfg.hourWidth;
+    doc["config"]["width"]["minute"] = cfg.minuteWidth;
+    doc["config"]["width"]["second"] = cfg.secondWidth;
+    doc["config"]["spectrum"] = cfg.spectrum;
     
     String response;
     serializeJson(doc, response);
     req->send(200, "application/json", response);
+  });
+
+  // API: Display Mode Configuration (per mode, persistent)
+  server.on("/api/display/config", HTTP_GET, [](AsyncWebServerRequest *req) {
+    DynamicJsonDocument doc(512);
+
+    int mode = (int)displayMode;
+    if (req->hasParam("mode")) {
+      mode = atoi(req->getParam("mode")->value().c_str());
+    }
+
+    if (mode < 0 || mode >= DISPLAY_MAX) {
+      doc["ok"] = false;
+      doc["error"] = "Invalid mode";
+      String out;
+      serializeJson(doc, out);
+      req->send(400, "application/json", out);
+      return;
+    }
+
+    if (req->hasParam("reset")) {
+      modeConfigs[mode] = defaultModeConfigFor((uint8_t)mode);
+      saveModeConfigToEEPROM((uint8_t)mode);
+      doc["reset"] = true;
+    }
+
+    if (req->hasParam("set")) {
+      ModeDisplayConfig cfg = modeConfigs[mode];
+      auto parseByte = [&](const char* key, uint8_t currentValue) -> uint8_t {
+        if (!req->hasParam(key)) return currentValue;
+        int v = atoi(req->getParam(key)->value().c_str());
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        return (uint8_t)v;
+      };
+
+      auto parseWidth = [&](const char* key, uint8_t currentValue) -> uint8_t {
+        if (!req->hasParam(key)) return currentValue;
+        int v = atoi(req->getParam(key)->value().c_str());
+        if (v < 0) v = 0;
+        if (v > 12) v = 12;
+        return (uint8_t)v;
+      };
+
+      cfg.hourR = parseByte("hr", cfg.hourR);
+      cfg.hourG = parseByte("hg", cfg.hourG);
+      cfg.hourB = parseByte("hb", cfg.hourB);
+      cfg.minuteR = parseByte("mr", cfg.minuteR);
+      cfg.minuteG = parseByte("mg", cfg.minuteG);
+      cfg.minuteB = parseByte("mb", cfg.minuteB);
+      cfg.secondR = parseByte("sr", cfg.secondR);
+      cfg.secondG = parseByte("sg", cfg.secondG);
+      cfg.secondB = parseByte("sb", cfg.secondB);
+      cfg.hourWidth = parseWidth("hw", cfg.hourWidth);
+      cfg.minuteWidth = parseWidth("mw", cfg.minuteWidth);
+      cfg.secondWidth = parseWidth("sw", cfg.secondWidth);
+      cfg.spectrum = (uint8_t)min(2, max(0, req->hasParam("sp") ? atoi(req->getParam("sp")->value().c_str()) : (int)cfg.spectrum));
+
+      if (!isModeConfigValid(cfg)) {
+        doc["ok"] = false;
+        doc["error"] = "Invalid config values";
+        String out;
+        serializeJson(doc, out);
+        req->send(400, "application/json", out);
+        return;
+      }
+
+      modeConfigs[mode] = cfg;
+      saveModeConfigToEEPROM((uint8_t)mode);
+      doc["saved"] = true;
+    }
+
+    const ModeDisplayConfig &cfg = modeConfigs[mode];
+    doc["ok"] = true;
+    doc["mode"] = mode;
+    doc["hour"]["r"] = cfg.hourR;
+    doc["hour"]["g"] = cfg.hourG;
+    doc["hour"]["b"] = cfg.hourB;
+    doc["minute"]["r"] = cfg.minuteR;
+    doc["minute"]["g"] = cfg.minuteG;
+    doc["minute"]["b"] = cfg.minuteB;
+    doc["second"]["r"] = cfg.secondR;
+    doc["second"]["g"] = cfg.secondG;
+    doc["second"]["b"] = cfg.secondB;
+    doc["width"]["hour"] = cfg.hourWidth;
+    doc["width"]["minute"] = cfg.minuteWidth;
+    doc["width"]["second"] = cfg.secondWidth;
+    doc["spectrum"] = cfg.spectrum;
+
+    String out;
+    serializeJson(doc, out);
+    req->send(200, "application/json", out);
   });
   
   // API: Timezone
