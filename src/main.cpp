@@ -37,15 +37,15 @@ const int MAX_SCAN_CACHE = 30;
 
 // Display modes
 enum DisplayMode {
-  DISPLAY_SOLID = 0,        // Hour/min/sec overlay
-  DISPLAY_PROGRESS_BAR = 1, // Time as % fill (0-100% throughout day)
-  DISPLAY_PULSE_DOTS = 2,   // Dots pulse to seconds rhythm
-  DISPLAY_GRADIENT = 3,     // Color shifts throughout day
-  DISPLAY_BINARY = 4,       // Binary clock (hour/min/sec both)
-  DISPLAY_HOUR_MARKER = 5,  // Bright LED marks hour, dimmer fills minutes
-  DISPLAY_STROBE = 6,       // Flashes per second (1-60)
-  DISPLAY_RAINBOW = 7,      // Scrolling rainbow animation
-  DISPLAY_FLAME = 8,        // Flickering fire effect
+  DISPLAY_SOLID = 0,        // Rainbow orbit with HMS markers
+  DISPLAY_SIMPLE = 1,       // Clean 3-LED HMS (red/green/blue)
+  DISPLAY_PULSE = 2,        // Subtle pulse with HMS
+  DISPLAY_BINARY = 3,       // Binary clock stretched to 60 LEDs
+  DISPLAY_HOUR_MARKER = 4,  // Minute progress with hour beacon
+  DISPLAY_FLAME = 5,        // Optimized flame effect with HMS
+  DISPLAY_PASTEL = 6,       // Soft pastel HMS colors
+  DISPLAY_NEON = 7,         // Bright neon HMS
+  DISPLAY_COMET = 8,        // Animated HMS comet trails
   DISPLAY_MAX = 9
 };
 
@@ -236,72 +236,84 @@ void overlayTimeMarkers(int hour12, int minute, int second, int secTrailLen) {
   }
 }
 
-void displayMode_ProgressBar() {
+void displayMode_Simple() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
   memset(leds, 0, sizeof(leds));
-  int fill = (int)((uint32_t)daySeconds * NUM_LEDS / 86400);
-  uint32_t ms = millis();
-  uint8_t pulse = 90 + (uint8_t)((ms % 1000) * 120 / 1000);
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t r, g, b;
-    if (i <= fill) {
-      hsvToRgb((i * 240 / NUM_LEDS) + (second * 2), 255, pulse, r, g, b);
-      leds[i] = {r, g, b};
-    } else {
-      leds[i] = {8, 8, 16};
-    }
+  
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+  int minutePos = minute % NUM_LEDS;
+  int secondPos = second % NUM_LEDS;
+  
+  // Red hour marker (3 LEDs)
+  for (int i = -1; i <= 1; i++) {
+    int idx = (hourPos + i + NUM_LEDS) % NUM_LEDS;
+    leds[idx] = {255, 0, 0};
   }
-
-  overlayTimeMarkers(hour12, minute, second, 8);
+  
+  // Green minute marker (3 LEDs)
+  for (int i = -1; i <= 1; i++) {
+    int idx = (minutePos + i + NUM_LEDS) % NUM_LEDS;
+    leds[idx] = {0, 255, 0};
+  }
+  
+  // Blue second marker (3 LEDs)
+  for (int i = -1; i <= 1; i++) {
+    int idx = (secondPos + i + NUM_LEDS) % NUM_LEDS;
+    leds[idx] = {0, 0, 255};
+  }
+  
   applyBrightnessAndShow();
 }
 
-void displayMode_PulseDots() {
+void displayMode_Pulse() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
   memset(leds, 0, sizeof(leds));
   uint32_t ms = millis();
-  uint8_t beat = (uint8_t)((ms % 1000) < 500 ? ((ms % 500) * 255 / 500) : ((1000 - (ms % 1000)) * 255 / 500));
+  uint8_t beat = (uint8_t)((ms % 1000) < 500 ? ((ms % 500) * 80 / 500) : ((1000 - (ms % 1000)) * 80 / 500));
 
+  // Very dim background pulse (reduced from previous)
   for (int i = 0; i < NUM_LEDS; i++) {
-    int ring = i % 5;
-    uint8_t base = 20 + (ring * 8);
-    leds[i] = {base / 2, base, base + beat / 6};
+    uint8_t base = 5 + beat / 8;
+    leds[i] = {base / 4, base / 3, base / 2};
   }
 
-  int secPos = second;
-  for (int i = 0; i < NUM_LEDS; i++) {
-    int d = abs(i - secPos);
-    d = min(d, NUM_LEDS - d);
-    if (d < 10) {
-      uint8_t boost = (uint8_t)((10 - d) * beat / 10);
-      addPixelWrap(i, boost / 4, boost / 3, boost);
-    }
-  }
-
-  overlayTimeMarkers(hour12, minute, second, 10);
+  // Clear HMS markers with more contrast
+  overlayTimeMarkers(hour12, minute, second, 7);
   applyBrightnessAndShow();
 }
 
-void displayMode_Gradient() {
+void displayMode_Pastel() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
   memset(leds, 0, sizeof(leds));
-  uint16_t dayHue = (uint32_t)daySeconds * 360 / 86400;
-  uint16_t shift = (millis() / 40) % 360;
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t r, g, b;
-    hsvToRgb((dayHue + shift + i * 5) % 360, 220, 90, r, g, b);
-    leds[i] = {r, g, b};
+  
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+  int minutePos = minute % NUM_LEDS;
+  int secondPos = second % NUM_LEDS;
+  
+  // Soft pastel hour (pink)
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 180 : 100;
+    addPixelWrap(hourPos + i, brightness, brightness / 3, brightness / 2);
   }
-
-  overlayTimeMarkers(hour12, minute, second, 12);
+  
+  // Soft pastel minute (mint green)
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 160 : 90;
+    addPixelWrap(minutePos + i, brightness / 4, brightness, brightness / 2);
+  }
+  
+  // Soft pastel second (sky blue)
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 180 : 100;
+    addPixelWrap(secondPos + i, brightness / 4, brightness / 2, brightness);
+  }
+  
   applyBrightnessAndShow();
 }
 
@@ -353,38 +365,65 @@ void displayMode_HourMarker() {
   applyBrightnessAndShow();
 }
 
-void displayMode_Strobe() {
+void displayMode_Neon() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
   memset(leds, 0, sizeof(leds));
-  uint32_t ms = millis();
-  int flashesPerSec = second + 1;
-  int cycle = max(16, 1000 / flashesPerSec);
-  bool on = (ms % cycle) < (cycle / 3);
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    leds[i] = on ? CRGB{55, 10, 10} : CRGB{12, 4, 4};
+  
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+  int minutePos = minute % NUM_LEDS;
+  int secondPos = second % NUM_LEDS;
+  
+  // Bright neon magenta hour
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 255 : 160;
+    addPixelWrap(hourPos + i, brightness, 0, brightness);
   }
-
-  overlayTimeMarkers(hour12, minute, second, 6);
+  
+  // Bright neon cyan minute
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 255 : 160;
+    addPixelWrap(minutePos + i, 0, brightness, brightness);
+  }
+  
+  // Bright neon yellow second
+  for (int i = -1; i <= 1; i++) {
+    uint8_t brightness = (i == 0) ? 255 : 160;
+    addPixelWrap(secondPos + i, brightness, brightness, 0);
+  }
+  
   applyBrightnessAndShow();
 }
 
-void displayMode_Rainbow() {
+void displayMode_Comet() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
   memset(leds, 0, sizeof(leds));
-  uint16_t drift = (millis() / 30) % 360;
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t r, g, b;
-    hsvToRgb((i * 360 / NUM_LEDS + drift) % 360, 255, 80, r, g, b);
-    leds[i] = {r, g, b};
+  
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+  int minutePos = minute % NUM_LEDS;
+  int secondPos = second % NUM_LEDS;
+  
+  // Hour comet trail (red, 7 LEDs long)
+  for (int i = 0; i < 7; i++) {
+    uint8_t fade = 255 - (i * 35);
+    addPixelWrap(hourPos - i, fade, 0, 0);
   }
-
-  overlayTimeMarkers(hour12, minute, second, 10);
+  
+  // Minute comet trail (green, 5 LEDs long)
+  for (int i = 0; i < 5; i++) {
+    uint8_t fade = 255 - (i * 50);
+    addPixelWrap(minutePos - i, 0, fade, 0);
+  }
+  
+  // Second comet trail (blue, 10 LEDs long with faster fade)
+  for (int i = 0; i < 10; i++) {
+    uint8_t fade = 255 - (i * 25);
+    addPixelWrap(secondPos - i, 0, 0, fade);
+  }
+  
   applyBrightnessAndShow();
 }
 
@@ -392,33 +431,37 @@ void displayMode_Flame() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
 
-  memset(leds, 0, sizeof(leds));
-  uint32_t phase = millis() / 20;
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint32_t x = (uint32_t)(i * 37 + phase * 13 + minute * 17);
-    uint8_t flicker = (uint8_t)((x ^ (x >> 3) ^ (x >> 5)) & 0x7F);
-    uint8_t r = 100 + flicker;
-    uint8_t g = 20 + flicker / 2;
-    uint8_t b = 2 + (flicker / 16);
-    leds[i] = {r, g, b};
+  // Optimize: update flame only every 50ms (20 times/sec instead of 60)
+  static uint32_t lastUpdate = 0;
+  uint32_t now = millis();
+  
+  if (now - lastUpdate > 50) {  // Update max 20 times/sec instead of 60
+    lastUpdate = now;
+    uint32_t phase = now / 40;  // Slower phase calculation
+    
+    for (int i = 0; i < NUM_LEDS; i++) {
+      // Simplified pseudo-random without heavy multiplication
+      uint32_t x = (uint32_t)(i * 41 + phase * 7);
+      uint8_t flicker = (uint8_t)((x ^ (x >> 4)) & 0x3F);  // Reduced bit ops
+      uint8_t r = 80 + flicker;
+      uint8_t g = 15 + flicker / 3;
+      uint8_t b = 2;
+      leds[i] = {r, g, b};
+    }
   }
 
-  overlayTimeMarkers(hour12, minute, second, 11);
+  overlayTimeMarkers(hour12, minute, second, 9);
   applyBrightnessAndShow();
 }
 
 void displayClock() {
   // Dispatcher: choose display mode
   switch (displayMode) {
-    case DISPLAY_PROGRESS_BAR:
-      displayMode_ProgressBar();
+    case DISPLAY_SIMPLE:
+      displayMode_Simple();
       break;
-    case DISPLAY_PULSE_DOTS:
-      displayMode_PulseDots();
-      break;
-    case DISPLAY_GRADIENT:
-      displayMode_Gradient();
+    case DISPLAY_PULSE:
+      displayMode_Pulse();
       break;
     case DISPLAY_BINARY:
       displayMode_Binary();
@@ -426,14 +469,17 @@ void displayClock() {
     case DISPLAY_HOUR_MARKER:
       displayMode_HourMarker();
       break;
-    case DISPLAY_STROBE:
-      displayMode_Strobe();
-      break;
-    case DISPLAY_RAINBOW:
-      displayMode_Rainbow();
-      break;
     case DISPLAY_FLAME:
       displayMode_Flame();
+      break;
+    case DISPLAY_PASTEL:
+      displayMode_Pastel();
+      break;
+    case DISPLAY_NEON:
+      displayMode_Neon();
+      break;
+    case DISPLAY_COMET:
+      displayMode_Comet();
       break;
     case DISPLAY_SOLID:
     default:
@@ -941,15 +987,15 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <div class='card'><h2>Display Mode</h2>
 <div class='form-group'><label>LED Display Style</label>
 <select id='displayMode' onchange='saveDisplayMode()' style='width:100%;padding:8px;border:1px solid #ddd;border-radius:4px'>
-<option value='0'>Solid Orbit (H/M/S comet)</option>
-<option value='1'>Day Progress (full-strip timeline)</option>
-<option value='2'>Pulse Wave (second heartbeat)</option>
-<option value='3'>Day Gradient (time-colored sweep)</option>
-<option value='4'>Binary 60 (stretched H/M/S bits)</option>
-<option value='5'>Marker Ring (hour+minute+second)</option>
-<option value='6'>Strobe Clock (tempo by seconds)</option>
-<option value='7'>Rainbow Clock (moving spectrum)</option>
-<option value='8'>Flame Clock (warm dynamic clock)</option>
+<option value='0'>Marker Ring (rainbow orbit + HMS)</option>
+<option value='1'>Simple HMS (clean 3-LED red/green/blue)</option>
+<option value='2'>Pulse (subtle heartbeat + HMS)</option>
+<option value='3'>Binary Clock (60 LEDs stretched bits)</option>
+<option value='4'>Hour Beacon (minute progress + markers)</option>
+<option value='5'>Flame HMS (warm flicker + markers)</option>
+<option value='6'>Pastel HMS (soft pink/mint/sky)</option>
+<option value='7'>Neon HMS (bright magenta/cyan/yellow)</option>
+<option value='8'>Comet Trails (animated HMS tails)</option>
 </select></div>
 <div style='font-size:11px;color:#888;margin-top:5px' id='modeDesc'>Choose a display mode</div>
 <button class='btn btn-secondary' onclick='updateModeDescription()'>Refresh Display</button>
@@ -1026,15 +1072,15 @@ fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textCon
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
 function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();}
 function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
-const desc={0:'All 60 LEDs are active. Red=hour marker, green=minute marker, blue=second comet with trail.',
-1:'All 60 LEDs form a day timeline. Filled section shows progress through 24h; H/M/S markers stay visible.',
-2:'All 60 LEDs pulse in waves. Pulse follows seconds while distinct red/green/blue time markers remain.',
-3:'All 60 LEDs show a moving day-color gradient; H/M/S overlays keep exact time readable.',
-4:'All 60 LEDs used as 20 groups × 3 LEDs: hour bits, minute bits, second bits stretched across strip.',
-5:'Ring map mode: minute progress fills the strip, hour is a bold beacon, second is a moving tail.',
-6:'Global strobe tempo follows seconds, but H/M/S markers stay visible on top for readability.',
-7:'Moving rainbow over all 60 LEDs with clear H/M/S markers layered above for instant read.',
-8:'Animated warm flame texture on all 60 LEDs with distinct H/M/S pointers for real clock behavior.'};
+const desc={0:'Rainbow orbit background with clear red hour, green minute, and blue second markers (5-3-7 LED spread).',
+1:'Minimal clean mode: exactly 3 LEDs each for red hour, green minute, blue second. No background.',
+2:'Very subtle background pulse (reduced from before) with strong HMS markers for easy readability.',
+3:'Binary clock stretched across all 60 LEDs: 20 groups × 3 LEDs showing hour/minute/second bits in color.',
+4:'Minute fills like a progress bar, hour shown as bright beacon, second has moving trail.',
+5:'Optimized warm flame effect (20fps update) with clear HMS markers. Performance improved.',
+6:'Soft pastel colors: pink hour, mint green minute, sky blue second. Gentle and easy on eyes.',
+7:'Bright neon colors: magenta hour, cyan minute, yellow second. Vivid and energetic.',
+8:'Animated comet trails: red hour (7 LED), green minute (5 LED), blue second (10 LED fast tail).'};
 document.getElementById('modeDesc').textContent=desc[m]||'Mode '+m;}
 function pollStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('fwVersion').textContent=d.fw_version_base||'-';
@@ -1166,14 +1212,14 @@ void setupWebServer() {
     DynamicJsonDocument doc(512);
     doc["current_mode"] = displayMode;
     doc["available_modes"]["SOLID"] = DISPLAY_SOLID;
-    doc["available_modes"]["PROGRESS_BAR"] = DISPLAY_PROGRESS_BAR;
-    doc["available_modes"]["PULSE_DOTS"] = DISPLAY_PULSE_DOTS;
-    doc["available_modes"]["GRADIENT"] = DISPLAY_GRADIENT;
+    doc["available_modes"]["SIMPLE"] = DISPLAY_SIMPLE;
+    doc["available_modes"]["PULSE"] = DISPLAY_PULSE;
     doc["available_modes"]["BINARY"] = DISPLAY_BINARY;
     doc["available_modes"]["HOUR_MARKER"] = DISPLAY_HOUR_MARKER;
-    doc["available_modes"]["STROBE"] = DISPLAY_STROBE;
-    doc["available_modes"]["RAINBOW"] = DISPLAY_RAINBOW;
     doc["available_modes"]["FLAME"] = DISPLAY_FLAME;
+    doc["available_modes"]["PASTEL"] = DISPLAY_PASTEL;
+    doc["available_modes"]["NEON"] = DISPLAY_NEON;
+    doc["available_modes"]["COMET"] = DISPLAY_COMET;
     
     if (req->hasParam("mode")) {
       int newMode = atoi(req->getParam("mode")->value().c_str());
