@@ -26,9 +26,17 @@
 #define LED_PIN D4
 #endif
 
-// Build timestamp - compiler generates this automatically
-const char* FW_VERSION_BASE = "2.0.0";
-const char* FW_BUILD_TIME = __DATE__ " " __TIME__;
+// Version is injected by scripts/auto_version.py pre-build script.
+// MAJOR.MINOR.PATCH+BUILD  where minor=git commit count, build=compile counter.
+// To bump major/patch: edit version.json manually.
+#ifndef FW_VERSION_STR
+#  define FW_VERSION_STR "0.0.0+0"   // fallback if script didn't run
+#endif
+#ifndef FW_GIT_HASH
+#  define FW_GIT_HASH "unknown"
+#endif
+const char* FW_VERSION_BASE = FW_VERSION_STR;
+const char* FW_BUILD_TIME   = __DATE__ " " __TIME__;
 // AP_SSID is built at runtime with last 3 MAC bytes, e.g. "LED-Clock-A1B2C3"
 String AP_SSID_STR;
 const char* AP_SSID = nullptr; // set in setup() after WiFi.macAddress() is available
@@ -236,8 +244,8 @@ void captureBootInfo() {
   // Build reset-reason string
   char reason[128];
   snprintf(reason, sizeof(reason), "reason=%d (%s)", ri->reason, ESP.getResetReason().c_str());
-  // Crash reasons: 1=HW WDT, 3=exception, 4=soft WDT
-  bool isCrash = (ri->reason == 1 || ri->reason == 3 || ri->reason == 4);
+  // Crash reasons: 1=HW WDT, 2=Exception, 3=Soft WDT  (4=ESP.restart() is intentional)
+  bool isCrash = (ri->reason == 1 || ri->reason == 2 || ri->reason == 3);
   if (isCrash) {
     char crash[128];
     snprintf(crash, sizeof(crash), " CRASH! exccause=%d epc1=0x%08X excvaddr=0x%08X",
@@ -1126,7 +1134,11 @@ void checkWiFi() {
     wifiConnected = connected;
     if (connected) {
       Serial.println("[WiFi] Connected! IP: " + WiFi.localIP().toString() + "  SSID: " + WiFi.SSID());
-      detectTimezone();
+      if (lastTzCheck == 0) {
+        detectTimezone();
+      } else {
+        DLOGI("WiFi", "Reconnected -- skipping TZ detect (already done)  uptime=%lus", millis()/1000);
+      }
     } else {
       Serial.printf("[WiFi] Disconnected! Last status: %d (%s)\n", (int)status, wlStatusName(status));
       DLOGW("WiFi", "Disconnected  status=%s  uptime=%lus  heap=%u",
@@ -1267,7 +1279,7 @@ void updateWiFiConnect() {
       bootInfoSent = true;
       DLOGI("BOOT", "fw=%s  %s", FW_VERSION_BASE, cachedBootInfo.c_str());
     }
-    detectTimezone();
+    if (lastTzCheck == 0) detectTimezone();  // skip on reconnects — already detected
   } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
     wifiConnect.active = false;
     wifiConnect.connecting = false;
@@ -1587,7 +1599,7 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 
 <div class='card'><h2>Device Information</h2>
 <div style='font-size:12px;line-height:1.8;color:#666'>
-<div>Firmware: <span id='fwVersion'>-</span> <span id='fwBuildTime' style='font-size:10px;color:#999'></span></div>
+<div>Firmware: <span id='fwVersion'>-</span> <span id='fwBuildTime' style='font-size:10px;color:#999'></span> <span id='fwGitHash' style='font-size:10px;color:#666'></span></div>
 <div>IP Address: <span id='deviceIp'>-</span></div>
 <div>WiFi Mode: <span id='wifiMode'>AP</span></div>
 <div>Signal: <span id='signal'>-</span></div>
@@ -1705,6 +1717,7 @@ document.getElementById('modeDesc').textContent=desc[m]||'Mode '+m;}
 function pollStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('fwVersion').textContent=d.fw_version_base||'-';
 document.getElementById('fwBuildTime').textContent='('+d.fw_build_time+')';
+if(d.fw_git_hash){var h=document.getElementById('fwGitHash');if(h)h.textContent='git:'+d.fw_git_hash;}
 document.getElementById('deviceIp').textContent=d.ip||'-';
 document.getElementById('wifiMode').textContent=d.wifi_connected?'STA (Connected)':'AP (Hotspot)';
 document.getElementById('signal').textContent=d.wifi_connected?(d.wifi_rssi+' dBm'):'(AP mode)';
@@ -1775,6 +1788,7 @@ void setupWebServer() {
     doc["fw_version"] = fullVersion;
     doc["fw_version_base"] = FW_VERSION_BASE;
     doc["fw_build_time"] = FW_BUILD_TIME;
+    doc["fw_git_hash"] = FW_GIT_HASH;
     doc["time_hour"] = t->tm_hour;
     doc["time_minute"] = t->tm_min;
     doc["time_second"] = t->tm_sec;
@@ -2432,8 +2446,13 @@ void loop() {
       br.magic    = RTC_BOOT_MAGIC;
       br.uptime_s = millis() / 1000;
       ESP.rtcUserMemoryWrite(RTC_BOOT_SLOT, (uint32_t*)&br, sizeof(br));
-      // UDP heartbeat only when debug is connected
+      // UDP heartbeat -- boot info resent on first HB in case early packets were ARP-dropped
       if (wifiConnected && debugRemoteEnabled) {
+        static bool bootMsgConfirmed = false;
+        if (!bootMsgConfirmed) {
+          bootMsgConfirmed = true;
+          DLOGI("BOOT", "fw=%s  %s", FW_VERSION_BASE, cachedBootInfo.c_str());
+        }
         DLOGI("HB", "heap=%u frag=%u uptime=%lus mode=%d ntp=%d rssi=%d",
               ESP.getFreeHeap(), ESP.getHeapFragmentation(),
               millis() / 1000, (int)displayMode, ntpSynced ? 1 : 0,
