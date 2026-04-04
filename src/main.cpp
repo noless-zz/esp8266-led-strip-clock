@@ -116,6 +116,10 @@ struct {
 bool wifiConnected = false;
 unsigned long lastNtpSync = 0, lastTzCheck = 0;
 struct { int32_t utcOffset; String name; bool autoDetected; } tz = {0, "UTC", true};
+bool forceClockDisplay = false;   // show clock even before NTP
+bool forceStatusDisplay = false;  // show boot animation even after NTP synced
+String savedSsid;   // credentials loaded from EEPROM, used after AP is up
+String savedPass;
 struct {
   String source = "ip-api.com";
   String status = "idle";
@@ -520,7 +524,103 @@ void displayMode_Flame() {
 
 void displayClock() {
   // Dispatcher: choose display mode
+// Boot progress stages ├óΓé¼ΓÇ¥ advances externally as system state changes
+enum BootStage {
+  BOOT_STAGE_INIT     = 0,  // just started          ├óΓé¼ΓÇ¥ red,    LEDs 0-14
+  BOOT_STAGE_AP_UP    = 1,  // AP is up              ├óΓé¼ΓÇ¥ orange, LEDs 0-29
+  BOOT_STAGE_SCANNING = 2,  // scanning networks     ├óΓé¼ΓÇ¥ yellow, LEDs 0-44
+  BOOT_STAGE_STA_CONN = 3,  // STA connecting        ├óΓé¼ΓÇ¥ blue,   LEDs 0-59
+  BOOT_STAGE_WIFI_OK  = 4,  // WiFi connected        ├óΓé¼ΓÇ¥ green,  fill 60
+  BOOT_STAGE_NTP_WAIT = 5,  // waiting for NTP       ├óΓé¼ΓÇ¥ cyan,   full bounce
+};
+BootStage bootStage = BOOT_STAGE_INIT;
+
+void displayBootAnimation() {
+  if (!ledStrip) return;
+
+  // Each stage: {r, g, b, lastLED (inclusive), stepMs}
+  struct StageStyle { uint8_t r, g, b; uint8_t lastLed; uint8_t stepMs; };
+  static const StageStyle styles[] = {
+    {80,  0,  0, 14, 60},   // INIT     ├óΓé¼ΓÇ¥ red,    slow
+    {80, 40,  0, 29, 50},   // AP_UP    ├óΓé¼ΓÇ¥ orange
+    {70, 70,  0, 44, 40},   // SCANNING ├óΓé¼ΓÇ¥ yellow
+    { 0, 30, 90, 59, 30},   // STA_CONN ├óΓé¼ΓÇ¥ blue,   fast
+    { 0, 80,  0, 59, 20},   // WIFI_OK  ├óΓé¼ΓÇ¥ green,  fast fill
+    { 0, 70, 70, 59, 25},   // NTP_WAIT ├óΓé¼ΓÇ¥ cyan
+  };
+
+  const StageStyle& s = styles[(int)bootStage];
+
+  static int  pos       = 0;
+  static int  dir       = 1;
+  static int  fillCount = 0;
+  static BootStage lastStage = BOOT_STAGE_INIT;
+  static unsigned long lastStep = 0;
+
+  // Reset bounce position when stage changes
+  if (bootStage != lastStage) {
+    pos = 0; dir = 1; fillCount = 0;
+    lastStage = bootStage;
+  }
+
+  if (millis() - lastStep < s.stepMs) return;
+  lastStep = millis();
+
+  ledStrip->setBrightness(28);
+  ledStrip->clear();
+
+  const uint8_t TAIL = 7;
+
+  if (bootStage == BOOT_STAGE_WIFI_OK) {
+    // Green creeping fill ├óΓé¼ΓÇ¥ LED 0..fillCount lit, then a bright head
+    if (fillCount < NUM_LEDS) fillCount++;
+    for (int i = 0; i < fillCount; i++)
+      ledStrip->setPixelColor(i, ledStrip->Color(0, 25, 0));
+    if (fillCount < NUM_LEDS)
+      ledStrip->setPixelColor(fillCount, ledStrip->Color(0, 80, 0));
+  } else {
+    // Bouncing comet within 0..lastLed
+    int span = s.lastLed + 1;
+
+    // Draw tail
+    for (int t = 1; t <= TAIL; t++) {
+      int idx = pos - dir * t;
+      if (idx >= 0 && idx < span) {
+        uint8_t fade = (TAIL - t + 1) * 255 / ((TAIL + 1) * 8);
+        ledStrip->setPixelColor(idx, ledStrip->Color(
+          s.r * fade / 32, s.g * fade / 32, s.b * fade / 32));
+      }
+    }
+    // Draw head
+    ledStrip->setPixelColor(pos, ledStrip->Color(s.r, s.g, s.b));
+
+    // Bounce
+    pos += dir;
+    if (pos >= span) { pos = span - 2; dir = -1; }
+    if (pos < 0)     { pos = 1;        dir =  1; }
+  }
+
+  ledStrip->show();
+}
+
   switch (displayMode) {
+  time_t now = time(nullptr);
+  bool ntpSynced = (now >= 86400);
+
+  // forceStatusDisplay beats everything ├óΓé¼ΓÇ¥ always show animation
+  // otherwise: show animation until NTP synced, unless forceClockDisplay
+  if (forceStatusDisplay || (!ntpSynced && !forceClockDisplay)) {
+    displayBootAnimation();
+    return;
+  }
+
+  // Restore user brightness when transitioning to clock for the first time
+  static bool brightnessRestored = false;
+  if (!brightnessRestored) {
+    if (ledStrip) ledStrip->setBrightness(ledBrightness);
+    brightnessRestored = true;
+  }
+
     case DISPLAY_SIMPLE:
       displayMode_Simple();
       break;
@@ -626,14 +726,18 @@ void loadEEPROMSettings() {
     return;
   }
   
-  // Load WiFi SSID
+  // Load WiFi SSID ├óΓé¼ΓÇ¥ reject if any byte is non-printable (garbage/uninitialized EEPROM)
   String ssid = "";
   for (int i = 0; i < MAX_SSID_LEN; i++) {
     char c = EEPROM.read(EEPROM_SSID_ADDR + i);
+  bool ssidValid = true;
     if (c == 0) break;
     ssid += c;
   }
-  if (ssid.length() > 0) {
+    if (c < 0x20 || c > 0x7E) { ssidValid = false; break; }
+  if (!ssidValid || ssid.length() == 0) {
+    Serial.println("[EEPROM] No valid WiFi credentials stored");
+  } else {
     String pass = "";
     for (int i = 0; i < MAX_PASS_LEN; i++) {
       char c = EEPROM.read(EEPROM_PASS_ADDR + i);
@@ -641,7 +745,15 @@ void loadEEPROMSettings() {
       pass += c;
     }
     Serial.println("[EEPROM] Loaded WiFi: " + ssid);
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    // DEBUG: dump password bytes to verify EEPROM integrity
+    Serial.printf("[EEPROM] Pass len=%d chars: [", pass.length());
+    for (unsigned int i = 0; i < pass.length(); i++) {
+      Serial.printf("%c(0x%02X)", pass[i], (uint8_t)pass[i]);
+      if (i < pass.length() - 1) Serial.print(' ');
+    }
+    Serial.println("]");
+    savedSsid = ssid;
+    savedPass = pass;  // will be used in setupWiFi() after AP is up
   }
   
   // Load brightness
@@ -649,6 +761,14 @@ void loadEEPROMSettings() {
   if (br > 0 && br <= 255) ledBrightness = br;
   
   // Load timezone offset
+
+  // Load LED type
+  uint8_t rgbwFlag = EEPROM.read(EEPROM_RGBW_ADDR);
+  if (rgbwFlag == 0x01 || rgbwFlag == 0x00) ledRgbw = (rgbwFlag == 0x01);
+
+  // Load LED direction
+  uint8_t revFlag = EEPROM.read(EEPROM_REVERSED_ADDR);
+  if (revFlag == 0x01 || revFlag == 0x00) ledReversed = (revFlag == 0x01);
   int32_t tzOff = (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 0) << 24) |
                   (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 1) << 16) |
                   (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 2) << 8) |
@@ -693,6 +813,7 @@ void syncTimeNTP() {
   if (!wifiConnected) return;
   Serial.println("[NTP] Syncing with " + String(NTP_SERVER));
   configTime(tz.utcOffset, 0, NTP_SERVER);
+  bootStage = BOOT_STAGE_NTP_WAIT;
   time_t now = time(nullptr);
   int attempts = 50;
   while (now < 86400 && attempts-- > 0) { delay(100); now = time(nullptr); }
@@ -761,14 +882,6 @@ void detectTimezone() {
         readStart = millis();
       }
       if (!client.connected() && !client.available()) break;
-
-  // Load LED type
-  uint8_t rgbwFlag = EEPROM.read(EEPROM_RGBW_ADDR);
-  if (rgbwFlag == 0x01 || rgbwFlag == 0x00) ledRgbw = (rgbwFlag == 0x01);
-
-  // Load LED direction
-  uint8_t revFlag = EEPROM.read(EEPROM_REVERSED_ADDR);
-  if (revFlag == 0x01 || revFlag == 0x00) ledReversed = (revFlag == 0x01);
       delay(5);
     }
     client.stop();
@@ -855,14 +968,41 @@ void detectTimezone() {
 
 void checkWiFi() {
   static unsigned long lastCheck = 0;
+static const char* wlStatusName(wl_status_t s) {
+  switch (s) {
+    case WL_IDLE_STATUS:     return "IDLE";
+    case WL_NO_SSID_AVAIL:  return "NO_SSID_AVAIL";
+    case WL_SCAN_COMPLETED:  return "SCAN_COMPLETED";
+    case WL_CONNECTED:       return "CONNECTED";
+    case WL_CONNECT_FAILED:  return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED:    return "DISCONNECTED";
+    default:                 return "UNKNOWN";
+  }
+}
+
   if (millis() - lastCheck < 5000) return;
   lastCheck = millis();
-  
-  bool connected = (WiFi.status() == WL_CONNECTED);
+  static wl_status_t lastKnownStatus = WL_IDLE_STATUS;
+
+  wl_status_t status = WiFi.status();
+
+  // Log every status change (even outside an active connect attempt)
+  if (status != lastKnownStatus) {
+    Serial.printf("[WiFi] checkWiFi: status %s -> %s\n",
+                  wlStatusName(lastKnownStatus), wlStatusName(status));
+    lastKnownStatus = status;
+  }
+
+  bool connected = (status == WL_CONNECTED);
   if (connected != wifiConnected) {
     wifiConnected = connected;
-    Serial.println("[WiFi] " + String(connected ? "Connected" : "Disconnected"));
-    if (connected) detectTimezone();
+    if (connected) {
+      Serial.println("[WiFi] Connected! IP: " + WiFi.localIP().toString() + "  SSID: " + WiFi.SSID());
+      detectTimezone();
+    } else {
+      Serial.printf("[WiFi] Disconnected! Last status: %d (%s)\n", (int)status, wlStatusName(status));
+    }
   }
 }
 
@@ -913,18 +1053,33 @@ String getWifiScanJson() {
   return out;
 }
 
-bool startWiFiConnect(const String& ssid, const String& pass) {
-  if (ssid.length() == 0) return false;
-  if (wifiConnect.active) return false;
-  
+bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom = false) {
+  if (ssid.length() == 0) {
+    Serial.println("[WiFi] startWiFiConnect: SSID is empty, aborting");
+    return false;
+  }
+  if (wifiConnect.active) {
+    Serial.println("[WiFi] startWiFiConnect: already connecting, aborting");
+    return false;
+  }
+
+  Serial.println("[WiFi] --- Connection attempt ---");
+  Serial.println("[WiFi] Target SSID : " + ssid);
+  // DEBUG: print password bytes to catch any EEPROM corruption
+  Serial.printf("[WiFi] Pass (%d): [", pass.length());
+  for (unsigned int i = 0; i < pass.length(); i++) Serial.printf("%c", pass[i]);
+  Serial.println("]");
+  Serial.println("[WiFi] Current status: " + String(WiFi.status()));
+  Serial.println("[WiFi] MAC address  : " + WiFi.macAddress());
+
   wifiConnect.active = true;
   wifiConnect.connecting = true;
   wifiConnect.attemptedSsid = ssid;
   wifiConnect.startedAt = millis();
   wifiConnect.lastStatus = WiFi.status();
-  
-  saveEEPROMSettings(ssid, pass);
-  
+
+  if (saveToEeprom) saveEEPROMSettings(ssid, pass);
+
   // Check scan cache for channel
   int targetChannel = 0;
   for (int i = 0; i < scanCacheCount; i++) {
@@ -932,42 +1087,76 @@ bool startWiFiConnect(const String& ssid, const String& pass) {
       targetChannel = scanCache[i].channel;
       break;
     }
+      Serial.printf("[WiFi] Found in scan cache: ch=%d  rssi=%d  enc=%d\n",
+                    scanCache[i].channel, scanCache[i].rssi, scanCache[i].enc);
   }
-  
-  if (targetChannel > 0) {
-    Serial.printf("[WiFi] Connecting to %s on channel %d\n", ssid.c_str(), targetChannel);
-    WiFi.begin(ssid.c_str(), pass.c_str(), targetChannel);
-  } else {
-    WiFi.begin(ssid.c_str(), pass.c_str());
+  if (targetChannel == 0) {
+    Serial.println("[WiFi] Not in scan cache ├óΓé¼ΓÇ¥ connecting without channel hint");
   }
-  
+
+  // ESP8266 AP+STA constraint: both AP and STA must share the same radio channel.
+  // Restart AP on the router's channel before connecting, or STA stays DISCONNECTED.
+  if (targetChannel > 0 && targetChannel != (int)WiFi.channel()) {
+    Serial.printf("[WiFi] Restarting AP on ch=%d to match router\n", targetChannel);
+    WiFi.softAP(AP_SSID, AP_PASS, targetChannel);
+  }
+
+  Serial.printf("[WiFi] Calling WiFi.begin(\"%s\", <pass>)\n", ssid.c_str());
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.println("[WiFi] WiFi.begin() called, polling for result...");
+
   return true;
 }
 
 void updateWiFiConnect() {
   if (!wifiConnect.active) return;
-  
+
   wl_status_t status = WiFi.status();
   if (status == WL_CONNECTED) {
     wifiConnect.active = false;
+
+  // Log every status change during connection attempt
+  if (status != wifiConnect.lastStatus) {
+    unsigned long elapsed = millis() - wifiConnect.startedAt;
+    Serial.printf("[WiFi] Status changed: %s -> %s  (+%lums)\n",
+                  wlStatusName(wifiConnect.lastStatus), wlStatusName(status), elapsed);
+    wifiConnect.lastStatus = status;
+  }
+
     wifiConnect.connecting = false;
     wifiConnect.success = true;
     wifiConnected = true;
     Serial.print("[WiFi] Connected! IP: ");
     Serial.println(WiFi.localIP());
+    bootStage = BOOT_STAGE_WIFI_OK;
     detectTimezone();
   } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
     wifiConnect.active = false;
     wifiConnect.connecting = false;
     wifiConnect.success = false;
     wifiConnect.error = "Connection failed";
-  } else if (millis() - wifiConnect.startedAt > 30000) {
+    Serial.printf("[WiFi] Failed with status %d (%s) after %lums\n",
+                  (int)status, wlStatusName(status), millis() - wifiConnect.startedAt);
+  } else if (millis() - wifiConnect.startedAt > 20000) {
+    // Timeout ├óΓé¼ΓÇ¥ clear state, trigger a fresh scan, retry after scan completes
     wifiConnect.active = false;
     wifiConnect.connecting = false;
     wifiConnect.success = false;
     wifiConnect.error = "Connection timeout";
   }
 }
+    Serial.printf("[WiFi] Timeout! Last status: %d (%s) ├óΓé¼ΓÇ¥ rescanning and will retry\n",
+                  (int)status, wlStatusName(status));
+    WiFi.disconnect(false);
+    WiFi.scanNetworks(true, true);  // async rescan; boot auto-connect logic will retry
+  } else {
+    // Heartbeat every 5s so we can see it's still trying
+    static unsigned long lastHeartbeat = 0;
+    if (millis() - lastHeartbeat > 5000) {
+      lastHeartbeat = millis();
+      Serial.printf("[WiFi] Still connecting... status=%s  elapsed=%lus\n",
+                    wlStatusName(status), (millis() - wifiConnect.startedAt) / 1000);
+    }
 
 // ============================================================================
 // OTA & Firmware Update
