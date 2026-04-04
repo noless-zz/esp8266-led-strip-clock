@@ -60,6 +60,8 @@ const int EEPROM_DISPLAY_MODE_ADDR = 134;
 const int EEPROM_MODE_CFG_MAGIC_ADDR = 135;
 const int EEPROM_MODE_CFG_BASE_ADDR = 160;
 const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
+const int EEPROM_RGBW_ADDR = 136;          // 1 byte: 1=RGBW, 0=RGB
+const int EEPROM_REVERSED_ADDR = 137;      // 1 byte: 1=reversed, 0=normal
 const uint8_t EEPROM_MAGIC = 0xA7;
 const int MAX_SSID_LEN = 32;
 const int MAX_PASS_LEN = 64;
@@ -69,6 +71,8 @@ Adafruit_NeoPixel *ledStrip = nullptr;
 uint8_t ledBrightness = 76;  // 30%
 DisplayMode displayMode = DISPLAY_SOLID;
 struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
+bool ledRgbw = false;        // false=RGB, true=RGBW
+bool ledReversed = false;    // false=normal (0ΓåÆ59), true=reversed (59ΓåÆ0)
 
 struct ModeDisplayConfig {
   uint8_t hourR, hourG, hourB;
@@ -157,18 +161,23 @@ void saveDisplayModeToEEPROM();
 
 void setupLEDs() {
   if (ledStrip) delete ledStrip;
-  ledStrip = new Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRBW + NEO_KHZ800);
+  uint16_t ledType = ledRgbw ? (NEO_GRBW + NEO_KHZ800) : (NEO_GRB + NEO_KHZ800);
+  ledStrip = new Adafruit_NeoPixel(NUM_LEDS, LED_PIN, ledType);
   ledStrip->begin();
   ledStrip->setBrightness(ledBrightness);
   ledStrip->clear();
   ledStrip->show();
-  Serial.println("[LED] 60-LED RGBW clock initialized");
+  Serial.printf("[LED] 60-LED %s clock initialized\n", ledRgbw ? "RGBW" : "RGB");
 }
 
 void showLEDs() {
   if (!ledStrip) return;
   for (int i = 0; i < NUM_LEDS; i++) {
-    ledStrip->setPixelColor(i, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b, 0));
+    int phys = ledReversed ? (NUM_LEDS - 1 - i) : i;
+    if (ledRgbw)
+      ledStrip->setPixelColor(phys, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b, 0));
+    else
+      ledStrip->setPixelColor(phys, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b));
   }
   ledStrip->show();
 }
@@ -752,6 +761,14 @@ void detectTimezone() {
         readStart = millis();
       }
       if (!client.connected() && !client.available()) break;
+
+  // Load LED type
+  uint8_t rgbwFlag = EEPROM.read(EEPROM_RGBW_ADDR);
+  if (rgbwFlag == 0x01 || rgbwFlag == 0x00) ledRgbw = (rgbwFlag == 0x01);
+
+  // Load LED direction
+  uint8_t revFlag = EEPROM.read(EEPROM_REVERSED_ADDR);
+  if (revFlag == 0x01 || revFlag == 0x00) ledReversed = (revFlag == 0x01);
       delay(5);
     }
     client.stop();
@@ -1371,6 +1388,30 @@ void setupWebServer() {
   // API: WiFi Scan
   server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "application/json", getWifiScanJson());
+<div class='card'><h2>LED Strip Type</h2>
+<div class='form-group' style='display:flex;align-items:center;gap:12px'>
+<label style='margin:0'>RGB</label>
+<label style='position:relative;display:inline-block;width:48px;height:26px;margin:0'>
+<input type='checkbox' id='rgbwToggle' style='opacity:0;width:0;height:0' onchange='saveLedType()'>
+<span id='rgbwSlider' style='position:absolute;cursor:pointer;inset:0;background:#ccc;border-radius:26px;transition:.3s'></span>
+</label>
+<label style='margin:0'>RGBW</label>
+</div>
+<div style='font-size:11px;color:#888;margin-top:6px'>Current: <span id='ledTypeLabel'>RGB</span> &mdash; change restarts the LED driver</div>
+</div>
+
+<div class='card'><h2>LED Direction</h2>
+<div class='form-group' style='display:flex;align-items:center;gap:12px'>
+<label style='margin:0'>Normal</label>
+<label style='position:relative;display:inline-block;width:48px;height:26px;margin:0'>
+<input type='checkbox' id='revToggle' style='opacity:0;width:0;height:0' onchange='saveLedDirection()'>
+<span id='revSlider' style='position:absolute;cursor:pointer;inset:0;background:#ccc;border-radius:26px;transition:.3s'></span>
+</label>
+<label style='margin:0'>Reversed</label>
+</div>
+<div style='font-size:11px;color:#888;margin-top:6px'>Current: <span id='ledDirLabel'>Normal</span> &mdash; flips LED 0&harr;59 for opposite mounting orientation</div>
+</div>
+
   });
   
   // API: WiFi Connect
@@ -1441,6 +1482,8 @@ void setupWebServer() {
         displayMode = (DisplayMode)newMode;
         saveDisplayModeToEEPROM();
         doc["changed"] = true;
+function saveLedType(){const v=document.getElementById('rgbwToggle').checked?1:0;fetch('/api/ledtype?rgbw='+v).then(r=>r.json()).then(d=>{document.getElementById('rgbwSlider').style.background=d.rgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=d.rgbw?'RGBW':'RGB';}).catch(e=>console.warn(e));}
+function saveLedDirection(){const v=document.getElementById('revToggle').checked?1:0;fetch('/api/leddirection?reversed='+v).then(r=>r.json()).then(d=>{document.getElementById('revSlider').style.background=d.reversed?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=d.reversed?'Reversed':'Normal';}).catch(e=>console.warn(e));}
         doc["new_mode"] = displayMode;
       } else {
         doc["error"] = "Invalid mode";
@@ -1516,6 +1559,8 @@ void setupWebServer() {
       cfg.hourB = parseByte("hb", cfg.hourB);
       cfg.minuteR = parseByte("mr", cfg.minuteR);
       cfg.minuteG = parseByte("mg", cfg.minuteG);
+if(d.led_rgbw!==undefined){const isRgbw=d.led_rgbw===true;document.getElementById('rgbwToggle').checked=isRgbw;document.getElementById('rgbwSlider').style.background=isRgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=isRgbw?'RGBW':'RGB';}
+if(d.led_reversed!==undefined){const isRev=d.led_reversed===true;document.getElementById('revToggle').checked=isRev;document.getElementById('revSlider').style.background=isRev?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=isRev?'Reversed':'Normal';}
       cfg.minuteB = parseByte("mb", cfg.minuteB);
       cfg.secondR = parseByte("sr", cfg.secondR);
       cfg.secondG = parseByte("sg", cfg.secondG);
@@ -1582,6 +1627,8 @@ void setupWebServer() {
         tz.autoDetected = false;
         tz.name = "Manual";
         syncTimeNTP();
+    doc["led_rgbw"] = ledRgbw;
+    doc["led_reversed"] = ledReversed;
         req->send(200, "text/plain", "Manual timezone set");
       } else {
         req->send(400, "text/plain", "Missing offset param");
@@ -1663,6 +1710,23 @@ void setupWebServer() {
           Serial.println("\n[OTA] Update Failed!");
           Update.printError(Serial);
         }
+
+  // API: LED type (RGB / RGBW)
+  server.on("/api/ledtype", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (req->hasParam("rgbw")) {
+      bool newRgbw = (req->getParam("rgbw")->value() == "1");
+      if (newRgbw != ledRgbw) {
+        ledRgbw = newRgbw;
+        EEPROM.begin(EEPROM_SIZE);
+        EEPROM.write(EEPROM_RGBW_ADDR, ledRgbw ? 0x01 : 0x00);
+        EEPROM.commit();
+        setupLEDs();  // reinit strip with correct pixel type
+        Serial.printf("[LED] Switched to %s mode\n", ledRgbw ? "RGBW" : "RGB");
+      }
+    }
+    String json = String("{\"rgbw\":") + (ledRgbw ? "true" : "false") + "}";
+    req->send(200, "application/json", json);
+  });
       }
     }
   );
