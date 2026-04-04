@@ -17,6 +17,7 @@
 #include <Updater.h>
 #include <time.h>
 #include <sys/time.h>
+#include <WiFiUDP.h>
 
 #ifndef NUM_LEDS
 #define NUM_LEDS 60
@@ -62,7 +63,13 @@ const int EEPROM_DISPLAY_MODE_ADDR = 134;
 const int EEPROM_MODE_CFG_MAGIC_ADDR = 135;
 const int EEPROM_RGBW_ADDR = 136;          // 1 byte: 1=RGBW, 0=RGB
 const int EEPROM_REVERSED_ADDR = 137;      // 1 byte: 1=reversed, 0=normal
-const int EEPROM_MODE_CFG_BASE_ADDR = 160;
+const int EEPROM_MODE_CFG_BASE_ADDR = 160; // 9 modes x 13 bytes = 117 bytes -> uses 160-276
+// Debug remote logging (addr 279-298, after mode configs)
+const int EEPROM_DBG_MAGIC_ADDR   = 279;   // 1 byte: magic 0xD8
+const int EEPROM_DBG_ENABLED_ADDR = 280;   // 1 byte: 1=enabled
+const int EEPROM_DBG_IP_ADDR      = 281;   // 16 bytes: null-terminated IP string
+const int EEPROM_DBG_PORT_ADDR    = 297;   // 2 bytes: port (big-endian)
+const uint8_t EEPROM_DBG_MAGIC    = 0xD8;
 const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
 const uint8_t EEPROM_MAGIC = 0xA7;
 const int MAX_SSID_LEN = 32;
@@ -72,7 +79,7 @@ const int MAX_PASS_LEN = 64;
 Adafruit_NeoPixel *ledStrip = nullptr;
 uint8_t ledBrightness = 76;  // 30%
 bool ledRgbw = false;        // false=RGB, true=RGBW
-bool ledReversed = false;    // false=normal (0â†’59), true=reversed (59â†’0)
+bool ledReversed = false;    // false=normal (0â†'59), true=reversed (59â†'0)
 DisplayMode displayMode = DISPLAY_SOLID;
 struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
 
@@ -146,6 +153,23 @@ struct {
   unsigned long finishedAt = 0;
 } otaStatus;
 
+// RTC memory boot record -- survives WDT/exception resets, cleared on power-cycle
+struct BootRecord {
+  uint32_t magic;       // RTC_BOOT_MAGIC when valid
+  uint32_t uptime_s;    // last saved uptime in seconds (updated every 30s)
+  uint32_t boot_count;  // incremented each reboot
+};
+#define RTC_BOOT_MAGIC 0xB007C10CUL
+#define RTC_BOOT_SLOT  0  // offset 0 in user RTC memory (SDK reserves lower words)
+
+// Remote UDP debug logging
+bool debugRemoteEnabled = false;
+String debugServerIp = "";
+uint16_t debugServerPort = 7878;
+WiFiUDP debugUdp;
+String cachedBootInfo = "";      // captured in setup(), sent after WiFi connects
+bool bootInfoSent = false;
+
 // Forward declarations for display functions
 void displayMode_Simple();
 void displayMode_Pulse();
@@ -160,6 +184,72 @@ void setDefaultModeConfigs();
 void loadModeConfigsFromEEPROM();
 void saveModeConfigToEEPROM(uint8_t mode);
 void saveDisplayModeToEEPROM();
+
+// ============================================================================
+// Remote Debug Logging
+// ============================================================================
+
+void debugLogf(const char* level, const char* tag, const char* fmt, ...) {
+  char msg[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+  Serial.printf("[%lu][%s][%s] %s\n", millis(), level, tag, msg);
+  if (!debugRemoteEnabled || !wifiConnected || debugServerIp.length() == 0) return;
+  char packet[320];
+  int plen = snprintf(packet, sizeof(packet), "[%lu][%s][%s] %s\n", millis(), level, tag, msg);
+  debugUdp.beginPacket(debugServerIp.c_str(), debugServerPort);
+  debugUdp.write((const uint8_t*)packet, (size_t)plen);
+  debugUdp.endPacket();
+}
+
+#define DLOGI(tag, ...) debugLogf("INF", tag, __VA_ARGS__)
+#define DLOGE(tag, ...) debugLogf("ERR", tag, __VA_ARGS__)
+#define DLOGW(tag, ...) debugLogf("WRN", tag, __VA_ARGS__)
+
+void captureBootInfo() {
+  rst_info *ri = ESP.getResetInfoPtr();
+
+  // Read RTC boot record (valid across WDT/exception resets, not power cycles)
+  BootRecord br = {};
+  bool rtcValid = ESP.rtcUserMemoryRead(RTC_BOOT_SLOT, (uint32_t*)&br, sizeof(br))
+                  && (br.magic == RTC_BOOT_MAGIC);
+  uint32_t lastUptime_s  = rtcValid ? br.uptime_s  : 0;
+  uint32_t bootCount     = rtcValid ? br.boot_count + 1 : 1;
+
+  // Update record immediately so loop() can increment uptime from zero
+  br.magic      = RTC_BOOT_MAGIC;
+  br.uptime_s   = 0;
+  br.boot_count = bootCount;
+  ESP.rtcUserMemoryWrite(RTC_BOOT_SLOT, (uint32_t*)&br, sizeof(br));
+
+  // Format last uptime as h:mm:ss
+  char uptimeBuf[24];
+  if (rtcValid) {
+    snprintf(uptimeBuf, sizeof(uptimeBuf), "%luh%02lum%02lus",
+             lastUptime_s / 3600, (lastUptime_s % 3600) / 60, lastUptime_s % 60);
+  } else {
+    snprintf(uptimeBuf, sizeof(uptimeBuf), "unknown (power-on)");
+  }
+
+  // Build reset-reason string
+  char reason[128];
+  snprintf(reason, sizeof(reason), "reason=%d (%s)", ri->reason, ESP.getResetReason().c_str());
+  // Crash reasons: 1=HW WDT, 3=exception, 4=soft WDT
+  bool isCrash = (ri->reason == 1 || ri->reason == 3 || ri->reason == 4);
+  if (isCrash) {
+    char crash[128];
+    snprintf(crash, sizeof(crash), " CRASH! exccause=%d epc1=0x%08X excvaddr=0x%08X",
+             ri->exccause, ri->epc1, ri->excvaddr);
+    cachedBootInfo = String(reason) + String(crash);
+  } else {
+    cachedBootInfo = String(reason);
+  }
+
+  Serial.printf("[BOOT] #%lu  last_uptime=%s  %s\n",
+                bootCount, uptimeBuf, cachedBootInfo.c_str());
+}
 
 // ============================================================================
 // LED Functions
@@ -524,14 +614,14 @@ void displayMode_Flame() {
   applyBrightnessAndShow();
 }
 
-// Boot progress stages â€” advances externally as system state changes
+// Boot progress stages --" advances externally as system state changes
 enum BootStage {
-  BOOT_STAGE_INIT     = 0,  // just started          â€” red,    LEDs 0-14
-  BOOT_STAGE_AP_UP    = 1,  // AP is up              â€” orange, LEDs 0-29
-  BOOT_STAGE_SCANNING = 2,  // scanning networks     â€” yellow, LEDs 0-44
-  BOOT_STAGE_STA_CONN = 3,  // STA connecting        â€” blue,   LEDs 0-59
-  BOOT_STAGE_WIFI_OK  = 4,  // WiFi connected        â€” green,  fill 60
-  BOOT_STAGE_NTP_WAIT = 5,  // waiting for NTP       â€” cyan,   full bounce
+  BOOT_STAGE_INIT     = 0,  // just started          --" red,    LEDs 0-14
+  BOOT_STAGE_AP_UP    = 1,  // AP is up              --" orange, LEDs 0-29
+  BOOT_STAGE_SCANNING = 2,  // scanning networks     --" yellow, LEDs 0-44
+  BOOT_STAGE_STA_CONN = 3,  // STA connecting        --" blue,   LEDs 0-59
+  BOOT_STAGE_WIFI_OK  = 4,  // WiFi connected        --" green,  fill 60
+  BOOT_STAGE_NTP_WAIT = 5,  // waiting for NTP       --" cyan,   full bounce
 };
 BootStage bootStage = BOOT_STAGE_INIT;
 
@@ -541,12 +631,12 @@ void displayBootAnimation() {
   // Each stage: {r, g, b, lastLED (inclusive), stepMs}
   struct StageStyle { uint8_t r, g, b; uint8_t lastLed; uint8_t stepMs; };
   static const StageStyle styles[] = {
-    {80,  0,  0, 14, 60},   // INIT     â€” red,    slow
-    {80, 40,  0, 29, 50},   // AP_UP    â€” orange
-    {70, 70,  0, 44, 40},   // SCANNING â€” yellow
-    { 0, 30, 90, 59, 30},   // STA_CONN â€” blue,   fast
-    { 0, 80,  0, 59, 20},   // WIFI_OK  â€” green,  fast fill
-    { 0, 70, 70, 59, 25},   // NTP_WAIT â€” cyan
+    {80,  0,  0, 14, 60},   // INIT     --" red,    slow
+    {80, 40,  0, 29, 50},   // AP_UP    --" orange
+    {70, 70,  0, 44, 40},   // SCANNING --" yellow
+    { 0, 30, 90, 59, 30},   // STA_CONN --" blue,   fast
+    { 0, 80,  0, 59, 20},   // WIFI_OK  --" green,  fast fill
+    { 0, 70, 70, 59, 25},   // NTP_WAIT --" cyan
   };
 
   const StageStyle& s = styles[(int)bootStage];
@@ -572,7 +662,7 @@ void displayBootAnimation() {
   const uint8_t TAIL = 7;
 
   if (bootStage == BOOT_STAGE_WIFI_OK) {
-    // Green creeping fill â€” LED 0..fillCount lit, then a bright head
+    // Green creeping fill --" LED 0..fillCount lit, then a bright head
     if (fillCount < NUM_LEDS) fillCount++;
     for (int i = 0; i < fillCount; i++)
       ledStrip->setPixelColor(i, ledStrip->Color(0, 25, 0));
@@ -607,7 +697,7 @@ void displayClock() {
   time_t now = time(nullptr);
   bool ntpSynced = (now >= 86400);
 
-  // forceStatusDisplay beats everything â€” always show animation
+  // forceStatusDisplay beats everything --" always show animation
   // otherwise: show animation until NTP synced, unless forceClockDisplay
   if (forceStatusDisplay || (!ntpSynced && !forceClockDisplay)) {
     displayBootAnimation();
@@ -728,7 +818,7 @@ void loadEEPROMSettings() {
     return;
   }
   
-  // Load WiFi SSID â€” reject if any byte is non-printable (garbage/uninitialized EEPROM)
+  // Load WiFi SSID --" reject if any byte is non-printable (garbage/uninitialized EEPROM)
   String ssid = "";
   bool ssidValid = true;
   for (int i = 0; i < MAX_SSID_LEN; i++) {
@@ -782,6 +872,31 @@ void loadEEPROMSettings() {
   if (mode < DISPLAY_MAX) displayMode = (DisplayMode)mode;
 
   loadModeConfigsFromEEPROM();
+
+  // Load debug remote logging settings
+  if (EEPROM.read(EEPROM_DBG_MAGIC_ADDR) == EEPROM_DBG_MAGIC) {
+    debugRemoteEnabled = (EEPROM.read(EEPROM_DBG_ENABLED_ADDR) == 0x01);
+    char ipBuf[17] = {};
+    for (int i = 0; i < 16; i++) ipBuf[i] = (char)EEPROM.read(EEPROM_DBG_IP_ADDR + i);
+    ipBuf[16] = 0;
+    debugServerIp = String(ipBuf);
+    uint16_t pHi = EEPROM.read(EEPROM_DBG_PORT_ADDR);
+    uint16_t pLo = EEPROM.read(EEPROM_DBG_PORT_ADDR + 1);
+    uint16_t p = (pHi << 8) | pLo;
+    if (p > 0 && p < 65535) debugServerPort = p;
+  }
+}
+
+void saveDebugConfig() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_DBG_MAGIC_ADDR, EEPROM_DBG_MAGIC);
+  EEPROM.write(EEPROM_DBG_ENABLED_ADDR, debugRemoteEnabled ? 0x01 : 0x00);
+  for (int i = 0; i < 16; i++) {
+    EEPROM.write(EEPROM_DBG_IP_ADDR + i, (uint8_t)(i < (int)debugServerIp.length() ? debugServerIp[i] : 0));
+  }
+  EEPROM.write(EEPROM_DBG_PORT_ADDR,     (debugServerPort >> 8) & 0xFF);
+  EEPROM.write(EEPROM_DBG_PORT_ADDR + 1, debugServerPort & 0xFF);
+  EEPROM.commit();
 }
 
 void saveEEPROMSettings(const String& ssid, const String& pass) {
@@ -805,6 +920,7 @@ void saveEEPROMSettings(const String& ssid, const String& pass) {
   
   EEPROM.commit();
   Serial.println("[EEPROM] Saved settings for " + ssid);
+  DLOGI("EEPROM", "Settings saved  ssid=%s  heap=%u", ssid.c_str(), ESP.getFreeHeap());
 }
 
 // ============================================================================
@@ -821,6 +937,9 @@ void syncTimeNTP() {
   while (now < 86400 && attempts-- > 0) { delay(100); now = time(nullptr); }
   if (now > 86400) {
     Serial.println("[NTP] Time synced");
+    DLOGI("NTP", "Synced  epoch=%lu  tz=%s  heap=%u", (unsigned long)now, tz.name.c_str(), ESP.getFreeHeap());
+  } else {
+    DLOGW("NTP", "Sync failed after %d attempts  heap=%u", 50, ESP.getFreeHeap());
   }
   lastNtpSync = millis();
 }
@@ -839,7 +958,7 @@ void detectTimezone() {
     Serial.println("[GEO] Not connected to WiFi, skipping timezone detection");
     return;
   }
-  Serial.println("[GEO] Detecting timezone from IP geolocation...");
+  DLOGI("TZ", "Auto-detect start  heap=%u", ESP.getFreeHeap());
 
   struct TzProvider { const char* host; const char* path; const char* label; };
   TzProvider providers[] = {
@@ -852,11 +971,14 @@ void detectTimezone() {
     WiFiClient client;
     tzDiag.source = providers[p].label;
 
+    DLOGI("TZ", "Trying %s (heap=%u)", providers[p].label, ESP.getFreeHeap());
     if (!client.connect(providers[p].host, 80)) {
       tzDiag.status = "error";
       tzDiag.message = String("connect failed to ") + providers[p].host;
+      DLOGW("TZ", "%s connect failed", providers[p].label);
       continue;
     }
+    DLOGI("TZ", "%s connected", providers[p].label);
 
     client.print("GET ");
     client.print(providers[p].path);
@@ -956,10 +1078,13 @@ void detectTimezone() {
     tzDiag.message = "timezone=" + tz.name + ", offset=" + String(tz.utcOffset);
     tzDiag.lastSuccessMs = millis();
     detected = true;
+    DLOGI("TZ", "OK  tz=%s  offset=%ld  via=%s  heap=%u",
+          tz.name.c_str(), (long)tz.utcOffset, providers[p].label, ESP.getFreeHeap());
     break;
   }
 
   if (!detected) {
+    DLOGE("TZ", "All providers failed: %s", tzDiag.message.c_str());
     Serial.println("[GEO] All timezone providers failed: " + tzDiag.message);
     return;
   }
@@ -1004,6 +1129,8 @@ void checkWiFi() {
       detectTimezone();
     } else {
       Serial.printf("[WiFi] Disconnected! Last status: %d (%s)\n", (int)status, wlStatusName(status));
+      DLOGW("WiFi", "Disconnected  status=%s  uptime=%lus  heap=%u",
+            wlStatusName(status), millis()/1000, ESP.getFreeHeap());
     }
   }
 }
@@ -1093,7 +1220,7 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom 
     }
   }
   if (targetChannel == 0) {
-    Serial.println("[WiFi] Not in scan cache â€” connecting without channel hint");
+    Serial.println("[WiFi] Not in scan cache -- connecting without channel hint");
   }
 
   // ESP8266 AP+STA constraint: both AP and STA must share the same radio channel.
@@ -1106,6 +1233,8 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom 
   Serial.printf("[WiFi] Calling WiFi.begin(\"%s\", <pass>)\n", ssid.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
   Serial.println("[WiFi] WiFi.begin() called, polling for result...");
+  DLOGI("WiFi", "Connecting  ssid=%s  ch=%d  heap=%u",
+        ssid.c_str(), targetChannel, ESP.getFreeHeap());
 
   return true;
 }
@@ -1131,6 +1260,13 @@ void updateWiFiConnect() {
     bootStage = BOOT_STAGE_WIFI_OK;
     Serial.print("[WiFi] Connected! IP: ");
     Serial.println(WiFi.localIP());
+    DLOGI("WiFi", "Connected  ssid=%s  ip=%s  rssi=%d  ch=%d  heap=%u",
+          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+          WiFi.RSSI(), (int)WiFi.channel(), ESP.getFreeHeap());
+    if (!bootInfoSent) {
+      bootInfoSent = true;
+      DLOGI("BOOT", "fw=%s  %s", FW_VERSION_BASE, cachedBootInfo.c_str());
+    }
     detectTimezone();
   } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
     wifiConnect.active = false;
@@ -1139,14 +1275,19 @@ void updateWiFiConnect() {
     wifiConnect.error = "Connection failed";
     Serial.printf("[WiFi] Failed with status %d (%s) after %lums\n",
                   (int)status, wlStatusName(status), millis() - wifiConnect.startedAt);
+    DLOGE("WiFi", "FAILED  status=%s  ssid=%s  after=%lums  heap=%u",
+          wlStatusName(status), wifiConnect.attemptedSsid.c_str(),
+          millis() - wifiConnect.startedAt, ESP.getFreeHeap());
   } else if (millis() - wifiConnect.startedAt > 20000) {
-    // Timeout â€” clear state, trigger a fresh scan, retry after scan completes
+    // Timeout -- clear state, trigger a fresh scan, retry after scan completes
     wifiConnect.active = false;
     wifiConnect.connecting = false;
     wifiConnect.success = false;
     wifiConnect.error = "Connection timeout";
-    Serial.printf("[WiFi] Timeout! Last status: %d (%s) â€” rescanning and will retry\n",
+    Serial.printf("[WiFi] Timeout! Last status: %d (%s) -- rescanning and will retry\n",
                   (int)status, wlStatusName(status));
+    DLOGW("WiFi", "TIMEOUT  status=%s  ssid=%s  heap=%u",
+          wlStatusName(status), wifiConnect.attemptedSsid.c_str(), ESP.getFreeHeap());
     WiFi.disconnect(false);
     WiFi.scanNetworks(true, true);  // async rescan; boot auto-connect logic will retry
   } else {
@@ -1261,11 +1402,11 @@ function updateStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
   const now=new Date();
   document.getElementById('time').textContent=now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   document.getElementById('date').textContent=now.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
-  document.getElementById('wifi').textContent=d.wifi_connected?'âœ“ '+d.wifi_ssid:'âœ— Offline';
+  document.getElementById('wifi').textContent=d.wifi_connected?'âœ" '+d.wifi_ssid:'âœ-- Offline';
   document.getElementById('signal').textContent=d.wifi_rssi?d.wifi_rssi+' dBm':'--';
   document.getElementById('tz').textContent=d.timezone||'UTC';
   document.getElementById('tz_debug').textContent=d.timezone_auto_detected?'Auto '+d.timezone_utc_offset_hours+'h':'Manual '+d.timezone_utc_offset_hours+'h';
-  document.getElementById('ntp').textContent=d.ntp_synced?'âœ“ Synced':'â± Wait';
+  document.getElementById('ntp').textContent=d.ntp_synced?'âœ" Synced':'â± Wait';
   document.getElementById('fw').textContent=d.fw_version_base||'-';document.getElementById('fw').title='Build: '+(d.fw_build_time||'unknown');
   document.getElementById('bright').textContent=d.brightness+'%';
   document.getElementById('ip').textContent=d.ip||'-';
@@ -1412,9 +1553,30 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <div style='font-size:11px;color:#888;margin-top:6px'>Current: <span id='ledDirLabel'>Normal</span> &mdash; flips LED 0&harr;59 for opposite mounting orientation</div>
 </div>
 
+<div class='card'><h2>Debug Logging</h2>
+<div class='form-group'><label>Debug Server IP</label>
+<input type='text' id='dbgIp' placeholder='192.168.x.x' style='width:100%;padding:8px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px;font-size:14px'></div>
+<div class='form-group'><label>UDP Port (default 7878)</label>
+<input type='number' id='dbgPort' value='7878' min='1' max='65535' style='width:100%;padding:8px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px;font-size:14px'></div>
+<div class='form-group' style='display:flex;align-items:center;gap:12px'>
+<label style='margin:0'>Remote UDP Log</label>
+<label style='position:relative;display:inline-block;width:48px;height:26px;margin:0'>
+<input type='checkbox' id='dbgToggle' style='opacity:0;width:0;height:0' onchange='saveDebugConfig()'>
+<span id='dbgSlider' style='position:absolute;cursor:pointer;inset:0;background:#ccc;border-radius:26px;transition:.3s'></span>
+</label>
+<span id='dbgEnabledLabel'>Disabled</span>
+</div>
+<div style='display:flex;gap:8px;margin-top:10px'>
+<button onclick='saveDebugConfig()' class='btn btn-primary' style='padding:8px 16px'>Save</button>
+<button onclick='sendDebugTest()' class='btn btn-secondary' style='padding:8px 16px'>Send Test</button>
+</div>
+<div id='dbgMsg' class='status-msg' style='margin-top:8px'></div>
+<div style='font-size:11px;color:#888;margin-top:8px'>UDP log packets sent to server IP:port.<br>Run <code>node scripts/debug-server.js</code> in VSCode terminal &mdash; then open <code>http://localhost:7879</code> to view live logs.</div>
+</div>
+
 <div class='card'><h2>Firmware Update</h2>
 <div class='upload-area' onclick='document.getElementById("fwFile").click()' id='uploadArea'>
-<p id='fileName'>ðŸ“ Click to select .bin firmware file</p>
+<p id='fileName'>ðŸ" Click to select .bin firmware file</p>
 <input type='file' id='fwFile' accept='.bin' style='display:none' onchange='fileSelected(this)'>
 </div>
 <button class='upload-btn' id='uploadBtn' onclick='uploadFirmware()' disabled>Upload Firmware</button>
@@ -1445,17 +1607,17 @@ document.getElementById('brightValue').textContent=v;document.getElementById('br
 let modeCfgSaveTimer=null,modeCfgPersistTimer=null;
 function toggleTzMode(){document.getElementById('manualTz').style.display=document.querySelector('input[name="tzmode"]:checked').value==='manual'?'block':'none';}
 function fileSelected(input){const sb=document.getElementById('statusMsg');const ub=document.getElementById('uploadBtn');fwFile=null;ub.disabled=true;
-if(input.files.length===0)return;fwFile=input.files[0];document.getElementById('fileName').textContent='ðŸ“„ '+fwFile.name;sb.textContent='Checking firmware...';sb.className='status-msg status-info';
+if(input.files.length===0)return;fwFile=input.files[0];document.getElementById('fileName').textContent='ðŸ"„ '+fwFile.name;sb.textContent='Checking firmware...';sb.className='status-msg status-info';
 const r=new FileReader();r.onload=()=>{const b=new Uint8Array(r.result);const m=b.length>0?b[0]:0;
 fetch('/api/update/precheck?name='+encodeURIComponent(fwFile.name)+'&size='+fwFile.size+'&magic='+m).then(r=>r.json()).then(d=>{
-if(d.ok){ub.disabled=false;sb.textContent='âœ“ '+d.summary;sb.className='status-msg status-ok';}else{ub.disabled=true;sb.textContent='âœ— '+d.error;sb.className='status-msg status-err';}}).catch(e=>{ub.disabled=true;sb.textContent='Check failed: '+e;sb.className='status-msg status-err';});};
+if(d.ok){ub.disabled=false;sb.textContent='âœ" '+d.summary;sb.className='status-msg status-ok';}else{ub.disabled=true;sb.textContent='âœ-- '+d.error;sb.className='status-msg status-err';}}).catch(e=>{ub.disabled=true;sb.textContent='Check failed: '+e;sb.className='status-msg status-err';});};
 r.onerror=()=>{ub.disabled=true;sb.textContent='Failed to read file';sb.className='status-msg status-err';};r.readAsArrayBuffer(fwFile.slice(0,1));}
 function uploadFirmware(){if(!fwFile||uploading)return;if(!confirm('Upload '+fwFile.name+'?'))return;uploading=true;document.getElementById('uploadBtn').disabled=true;
 const sb=document.getElementById('statusMsg');const pb=document.getElementById('progBar');const pf=document.getElementById('progFill');pb.style.display='block';sb.textContent='';
 const fd=new FormData();fd.append('firmware',fwFile);const x=new XMLHttpRequest();
 x.upload.addEventListener('progress',(e)=>{if(e.lengthComputable)pf.style.width=(e.loaded/e.total*100)+'%';});
-x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='âœ“ Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='âœ— '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='âœ— Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
-x.addEventListener('error',()=>{uploading=false;sb.textContent='âœ— Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
+x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='âœ" Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='âœ-- '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='âœ-- Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
+x.addEventListener('error',()=>{uploading=false;sb.textContent='âœ-- Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
 x.open('POST','/api/update?approve=1');x.send(fd);}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
@@ -1466,24 +1628,26 @@ _scanData=d.networks||[];list.innerHTML='';if(!_scanData.length){list.innerHTML=
 _scanData.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=(n.enc?'\uD83D\uDD12 ':'\uD83D\uDD13 ')+n.ssid+' ('+n.rssi+' dBm)';list.appendChild(o);});
 ss.textContent='found '+_scanData.length;sb.disabled=false;}).catch(e=>{list.innerHTML='<option>Scan failed</option>';ss.textContent='error';sb.disabled=false;});}
 function pollConnect(s){const msg=document.getElementById('wifiMsg');fetch('/api/wifi/connect').then(r=>r.json()).then(d=>{
-if(d.connected){msg.textContent='âœ“ Connected to "'+s+'"! IP: '+d.ip;msg.className='status-msg status-ok';}
+if(d.connected){msg.textContent='âœ" Connected to "'+s+'"! IP: '+d.ip;msg.className='status-msg status-ok';}
 else if(d.connecting){msg.textContent='Connecting to "'+s+'"...';setTimeout(()=>pollConnect(s),800);}
-else{msg.textContent='âœ— '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
+else{msg.textContent='âœ-- '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
 function connectWifi(){const s=document.getElementById('wifiSsid').value.trim();const p=document.getElementById('wifiPass').value;const msg=document.getElementById('wifiMsg');
 if(!s){msg.textContent='Enter or select a network name';msg.className='status-msg status-err';return;}
 msg.textContent='Connecting to "'+s+'"'+(p?'':' (open)');msg.className='status-msg status-info';
 const sp=new URLSearchParams({ssid:s,pass:p});fetch('/api/wifi/connect?'+sp.toString()).then(r=>r.json()).then(d=>{
-if(d.connected){msg.textContent='âœ“ Connected! IP: '+d.ip;msg.className='status-msg status-ok';}
+if(d.connected){msg.textContent='âœ" Connected! IP: '+d.ip;msg.className='status-msg status-ok';}
 else if(d.connecting){setTimeout(()=>pollConnect(s),800);}
-else{msg.textContent='âœ— '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
+else{msg.textContent='âœ-- '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
 function syncNTP(){const msg=document.getElementById('tzMsg');msg.textContent='Syncing...';msg.className='status-msg status-info';
-fetch('/api/ntp').then(r=>r.text()).then(t=>{msg.textContent='âœ“ Syncing with NTP server...';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='âœ— Error: '+e;msg.className='status-msg status-err';});}
+fetch('/api/ntp').then(r=>r.text()).then(t=>{msg.textContent='âœ" Syncing with NTP server...';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='âœ-- Error: '+e;msg.className='status-msg status-err';});}
 function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:checked').value;const o=m==='manual'?document.getElementById('tzOffset').value:'0';
 const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
-fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='âœ“ Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='âœ— Error: '+e;b.className='status-msg status-err';});}
+fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='âœ" Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='âœ-- Error: '+e;b.className='status-msg status-err';});}
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
 function saveLedType(){const v=document.getElementById('rgbwToggle').checked?1:0;fetch('/api/ledtype?rgbw='+v).then(r=>r.json()).then(d=>{document.getElementById('rgbwSlider').style.background=d.rgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=d.rgbw?'RGBW':'RGB';}).catch(e=>console.warn(e));}
 function saveLedDirection(){const v=document.getElementById('revToggle').checked?1:0;fetch('/api/leddirection?reversed='+v).then(r=>r.json()).then(d=>{document.getElementById('revSlider').style.background=d.reversed?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=d.reversed?'Reversed':'Normal';}).catch(e=>console.warn(e));}
+function saveDebugConfig(){const ip=document.getElementById('dbgIp').value.trim();const port=document.getElementById('dbgPort').value||'7878';const en=document.getElementById('dbgToggle').checked?1:0;const msg=document.getElementById('dbgMsg');msg.textContent='Saving...';msg.className='status-msg status-info';fetch('/api/debug?enabled='+en+'&ip='+encodeURIComponent(ip)+'&port='+port).then(r=>r.json()).then(d=>{document.getElementById('dbgSlider').style.background=d.enabled?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=d.enabled?'Enabled':'Disabled';msg.textContent='✓ Saved';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
+function sendDebugTest(){const msg=document.getElementById('dbgMsg');msg.textContent='Sending...';msg.className='status-msg status-info';fetch('/api/debug?test=1').then(r=>r.json()).then(d=>{msg.textContent='✓ Test packet sent';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
 function rgbToHex(r,g,b){return'#'+[r,g,b].map(v=>{const h=Number(v).toString(16);return h.length===1?'0'+h:h;}).join('');}
 function hexToRgb(hex){const v=(hex||'#000000').replace('#','');if(v.length!==6)return{r:0,g:0,b:0};return{r:parseInt(v.substring(0,2),16),g:parseInt(v.substring(2,4),16),b:parseInt(v.substring(4,6),16)};}
 function updateWidthLabels(){document.getElementById('hourWidthLabel').textContent=document.getElementById('hourWidth').value;
@@ -1518,20 +1682,20 @@ function saveModeConfig(silent=false,persist=true){
 const msg=document.getElementById('modeCfgMsg');
 if(!silent){msg.textContent=persist?'Saving mode visuals...':'Applying mode visuals...';msg.className='status-msg status-info';}
 const q=buildModeCfgQuery(persist);
-fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){if(!silent){msg.textContent='âœ“ Mode visuals saved';msg.className='status-msg status-ok';}applyModeCfgToControls(d);}else{msg.textContent='âœ— '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
-.catch(e=>{msg.textContent='âœ— '+e;msg.className='status-msg status-err';});}
+fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){if(!silent){msg.textContent='âœ" Mode visuals saved';msg.className='status-msg status-ok';}applyModeCfgToControls(d);}else{msg.textContent='âœ-- '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
+.catch(e=>{msg.textContent='âœ-- '+e;msg.className='status-msg status-err';});}
 function resetModeConfig(){const m=document.getElementById('displayMode').value;
 const msg=document.getElementById('modeCfgMsg');
 msg.textContent='Resetting mode visuals...';msg.className='status-msg status-info';
 fetch('/api/mode/config?reset=1&persist=1&mode='+m).then(r=>r.json()).then(d=>{
-if(d&&d.ok){msg.textContent='âœ“ Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='âœ— '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
-}).catch(e=>{msg.textContent='âœ— '+e;msg.className='status-msg status-err';});}
+if(d&&d.ok){msg.textContent='âœ" Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='âœ-- '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
+}).catch(e=>{msg.textContent='âœ-- '+e;msg.className='status-msg status-err';});}
 function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();loadModeConfig();}
 function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
 const desc={0:'Rainbow orbit background with clear red hour, green minute, and blue second markers (5-3-7 LED spread).',
 1:'Minimal clean mode: exactly 3 LEDs each for red hour, green minute, blue second. No background.',
 2:'Very subtle background pulse (reduced from before) with strong HMS markers for easy readability.',
-3:'Binary clock stretched across all 60 LEDs: 20 groups Ã— 3 LEDs showing hour/minute/second bits in color.',
+3:'Binary clock stretched across all 60 LEDs: 20 groups Ã-- 3 LEDs showing hour/minute/second bits in color.',
 4:'Minute fills like a progress bar, hour shown as bright beacon, second has moving trail.',
 5:'Optimized warm flame effect (20fps update) with clear HMS markers. Performance improved.',
 6:'Soft pastel colors: pink hour, mint green minute, sky blue second. Gentle and easy on eyes.',
@@ -1561,6 +1725,9 @@ if(String(current)!==String(d.display_mode)){loadModeConfig();}
 if(d.display_cfg){applyModeCfgToControls(d.display_cfg);}
 if(d.led_rgbw!==undefined){const isRgbw=d.led_rgbw===true;document.getElementById('rgbwToggle').checked=isRgbw;document.getElementById('rgbwSlider').style.background=isRgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=isRgbw?'RGBW':'RGB';}
 if(d.led_reversed!==undefined){const isRev=d.led_reversed===true;document.getElementById('revToggle').checked=isRev;document.getElementById('revSlider').style.background=isRev?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=isRev?'Reversed':'Normal';}
+if(d.debug_enabled!==undefined){const en=d.debug_enabled===true;document.getElementById('dbgToggle').checked=en;document.getElementById('dbgSlider').style.background=en?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=en?'Enabled':'Disabled';}
+if(d.debug_ip){document.getElementById('dbgIp').value=d.debug_ip;}
+if(d.debug_port){document.getElementById('dbgPort').value=d.debug_port;}
 }).catch(e=>console.warn(e));}
 function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
 document.getElementById('hourWidth').addEventListener('input',updateWidthLabels);
@@ -1653,6 +1820,10 @@ void setupWebServer() {
     doc["display_cfg"]["spectrum"] = cfg.spectrum;
     doc["ip"] = wifiConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     doc["heap"] = ESP.getFreeHeap();
+    doc["heap_frag"] = ESP.getHeapFragmentation();
+    doc["debug_enabled"] = debugRemoteEnabled;
+    doc["debug_ip"] = debugServerIp;
+    doc["debug_port"] = debugServerPort;
     String json;
     serializeJson(doc, json);
     req->send(200, "application/json", json);
@@ -1744,7 +1915,33 @@ void setupWebServer() {
     req->send(200, "application/json", json);
   });
 
-  // API: Ring control â€” force_clock=1 â†’ show clock, force_clock=0 â†’ show status animation
+
+  // API: Remote debug logging config
+  server.on("/api/debug", HTTP_GET, [](AsyncWebServerRequest *req) {
+    bool changed = false;
+    if (req->hasParam("enabled")) {
+      debugRemoteEnabled = (req->getParam("enabled")->value() == "1");
+      changed = true;
+    }
+    if (req->hasParam("ip")) {
+      String newIp = req->getParam("ip")->value();
+      newIp.trim();
+      if (newIp.length() <= 15) { debugServerIp = newIp; changed = true; }
+    }
+    if (req->hasParam("port")) {
+      int p = atoi(req->getParam("port")->value().c_str());
+      if (p > 0 && p < 65536) { debugServerPort = (uint16_t)p; changed = true; }
+    }
+    if (changed) saveDebugConfig();
+    if (req->hasParam("test")) {
+      DLOGI("TEST", "Debug test from web UI  heap=%u  uptime=%lus", ESP.getFreeHeap(), millis()/1000);
+    }
+    String json = String("{\"enabled\":") + (debugRemoteEnabled ? "true" : "false") +
+                  ",\"ip\":\"" + debugServerIp + "\",\"port\":" + debugServerPort + "}";
+    req->send(200, "application/json", json);
+  });
+
+  // API: Ring control --" force_clock=1 â†' show clock, force_clock=0 â†' show status animation
   server.on("/api/ring", HTTP_GET, [](AsyncWebServerRequest *req) {
     if (req->hasParam("force_clock")) {
       bool wantClock = (req->getParam("force_clock")->value() == "1");
@@ -1987,10 +2184,12 @@ void setupWebServer() {
         uint32_t maxSize = getMaxUpdateSize();
         if (!Update.begin(maxSize, U_FLASH)) {
           Serial.println("[OTA] Update begin failed");
+          DLOGE("OTA", "Web upload begin FAILED  heap=%u", ESP.getFreeHeap());
           return;
         }
         Serial.print("[OTA] Updating: ");
         Serial.println(filename);
+        DLOGI("OTA", "Web upload start  file=%s  heap=%u", filename.c_str(), ESP.getFreeHeap());
       }
       
       if (Update.write(data, len) == len) {} else {
@@ -2000,9 +2199,11 @@ void setupWebServer() {
       if (final) {
         if (Update.end(true)) {
           Serial.println("\n[OTA] Update Success!");
+          DLOGI("OTA", "Web upload SUCCESS  written=%u", (unsigned)Update.progress());
         } else {
           Serial.println("\n[OTA] Update Failed!");
           Update.printError(Serial);
+          DLOGE("OTA", "Web upload FAILED  err=%u", (unsigned)Update.getError());
         }
       }
     }
@@ -2052,6 +2253,15 @@ void setupDNS() {
 
 void setupOTA() {
   ArduinoOTA.setPassword(OTA_PASS);
+  ArduinoOTA.onStart([]() {
+    DLOGI("OTA", "ArduinoOTA start  heap=%u", ESP.getFreeHeap());
+  });
+  ArduinoOTA.onEnd([]() {
+    DLOGI("OTA", "ArduinoOTA end -- rebooting");
+  });
+  ArduinoOTA.onError([](ota_error_t err) {
+    DLOGE("OTA", "ArduinoOTA error %u", (unsigned)err);
+  });
   ArduinoOTA.begin();
   Serial.println("[OTA] Ready");
 }
@@ -2077,6 +2287,7 @@ void setup() {
   Serial.println("  60-LED NeoPixel Clock with NTP Sync");
   Serial.println("\n");
   
+  captureBootInfo();
   setupLEDs();
   loadEEPROMSettings();
   setupWiFi();
@@ -2122,10 +2333,10 @@ void loop() {
   }
   
   // Serial command interface
-  // Commands:  wifi <SSID> [password]   â€” connect (omit password for open networks)
-  //            scan                     â€” trigger scan and print results
-  //            status                   â€” print current WiFi/time status
-  //            disconnect               â€” disconnect STA
+  // Commands:  wifi <SSID> [password]   --" connect (omit password for open networks)
+  //            scan                     --" trigger scan and print results
+  //            status                   --" print current WiFi/time status
+  //            disconnect               --" disconnect STA
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
@@ -2210,8 +2421,29 @@ void loop() {
     detectTimezone();
   }
   
+  // Periodic RTC uptime save + debug heartbeat (every 30s)
+  {
+    static unsigned long lastHb = 0;
+    if (millis() - lastHb > 30000) {
+      lastHb = millis();
+      // Save current uptime to RTC so next boot can report it
+      BootRecord br = {};
+      ESP.rtcUserMemoryRead(RTC_BOOT_SLOT, (uint32_t*)&br, sizeof(br));
+      br.magic    = RTC_BOOT_MAGIC;
+      br.uptime_s = millis() / 1000;
+      ESP.rtcUserMemoryWrite(RTC_BOOT_SLOT, (uint32_t*)&br, sizeof(br));
+      // UDP heartbeat only when debug is connected
+      if (wifiConnected && debugRemoteEnabled) {
+        DLOGI("HB", "heap=%u frag=%u uptime=%lus mode=%d ntp=%d rssi=%d",
+              ESP.getFreeHeap(), ESP.getHeapFragmentation(),
+              millis() / 1000, (int)displayMode, ntpSynced ? 1 : 0,
+              wifiConnected ? WiFi.RSSI() : 0);
+      }
+    }
+  }
+
   // Update LED clock display
   displayClock();
-  
+
   delay(100);
 }
