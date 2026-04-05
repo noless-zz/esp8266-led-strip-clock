@@ -3,6 +3,6 @@
   "patch": 0,
   "build": 2,
   "_note": "major: manual bump for architecture changes. patch: manual bump for releases. minor and build are auto-managed.",
-  "_minor_last": 34,
-  "_git_hash_last": "8581b06"
+  "_minor_last": 35,
+  "_git_hash_last": "501221a"
 }

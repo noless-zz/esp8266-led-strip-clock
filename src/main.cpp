@@ -78,6 +78,8 @@ const int EEPROM_DBG_ENABLED_ADDR = 280;   // 1 byte: 1=enabled
 const int EEPROM_DBG_IP_ADDR      = 281;   // 16 bytes: null-terminated IP string
 const int EEPROM_DBG_PORT_ADDR    = 297;   // 2 bytes: port (big-endian)
 const int EEPROM_FADE_MS_ADDR     = 299;   // 2 bytes: Simple mode fade duration (big-endian, 0=off)
+const int EEPROM_AUTO_BRIGHT_ADDR = 301;   // 6 bytes: magic(1), enabled(1), dim_val(1), peak_val(1), dim_hour(1), peak_hour(1)
+const uint8_t EEPROM_AUTO_BRIGHT_MAGIC = 0xAB;
 const uint8_t EEPROM_DBG_MAGIC    = 0xD8;
 const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
 const uint8_t EEPROM_MAGIC = 0xA7;
@@ -87,6 +89,11 @@ const int MAX_PASS_LEN = 64;
 // Global state - LEDs
 Adafruit_NeoPixel *ledStrip = nullptr;
 uint8_t ledBrightness = 76;  // 30%
+bool    autoBrightEnabled  = false;
+uint8_t autoBrightDimVal   = 26;   // 10% of 255  (night minimum)
+uint8_t autoBrightPeakVal  = 255;  // 100%        (day maximum)
+uint8_t autoBrightDimHour  = 2;    // 2 am
+uint8_t autoBrightPeakHour = 14;   // 2 pm
 bool ledRgbw = false;        // false=RGB, true=RGBW
 bool ledReversed = false;    // false=normal (0â†'59), true=reversed (59â†'0)
 DisplayMode displayMode = DISPLAY_SOLID;
@@ -321,11 +328,35 @@ void hsvToRgb(uint16_t hue, uint8_t sat, uint8_t val, uint8_t &r, uint8_t &g, ui
   }
 }
 
+// Returns 0-255 brightness for the current hour using a smooth cosine curve
+// between autoBrightDimHour (minimum) and autoBrightPeakHour (maximum).
+uint8_t computeAutoBrightness() {
+  time_t now = time(nullptr);
+  if (now < 86400) return autoBrightDimVal;  // no valid time yet, stay dim
+  struct tm* t = localtime(&now);
+  int h = t->tm_hour;
+  int halfPeriod = ((int)autoBrightPeakHour - (int)autoBrightDimHour + 24) % 24;
+  if (halfPeriod == 0) halfPeriod = 12;
+  int otherHalf = 24 - halfPeriod;
+  int tHours = (h - (int)autoBrightDimHour + 24) % 24;
+  float theta;
+  if (tHours <= halfPeriod) {
+    theta = M_PI * (float)tHours / (float)halfPeriod;
+  } else {
+    float rem = (float)(tHours - halfPeriod);
+    theta = M_PI + M_PI * rem / (float)otherHalf;
+  }
+  float f = 0.5f - 0.5f * cosf(theta);
+  float br = (float)autoBrightDimVal + ((float)autoBrightPeakVal - (float)autoBrightDimVal) * f;
+  return (uint8_t)constrain((int)br, 0, 255);
+}
+
 void applyBrightnessAndShow() {
+  uint8_t effectiveBr = autoBrightEnabled ? computeAutoBrightness() : ledBrightness;
   for (int i = 0; i < NUM_LEDS; i++) {
-    leds[i].r = (uint16_t)leds[i].r * ledBrightness / 255;
-    leds[i].g = (uint16_t)leds[i].g * ledBrightness / 255;
-    leds[i].b = (uint16_t)leds[i].b * ledBrightness / 255;
+    leds[i].r = (uint16_t)leds[i].r * effectiveBr / 255;
+    leds[i].g = (uint16_t)leds[i].g * effectiveBr / 255;
+    leds[i].b = (uint16_t)leds[i].b * effectiveBr / 255;
   }
   showLEDs();
 }
@@ -967,12 +998,38 @@ void loadEEPROMSettings() {
     uint16_t fms = (fHi << 8) | fLo;
     if (fms <= 2000) simpleFadeMs = fms;  // 0 = disabled, up to 2000ms
   }
+
+  // Load adaptive brightness settings
+  if (EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR) == EEPROM_AUTO_BRIGHT_MAGIC) {
+    autoBrightEnabled  = (EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR + 1) != 0);
+    uint8_t dv = EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR + 2);
+    uint8_t pv = EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR + 3);
+    uint8_t dh = EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR + 4);
+    uint8_t ph = EEPROM.read(EEPROM_AUTO_BRIGHT_ADDR + 5);
+    if (dh < 24 && ph < 24 && dh != ph) {
+      autoBrightDimVal   = dv;
+      autoBrightPeakVal  = pv;
+      autoBrightDimHour  = dh;
+      autoBrightPeakHour = ph;
+    }
+  }
 }
 
 void saveFadeMs() {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.write(EEPROM_FADE_MS_ADDR,     (simpleFadeMs >> 8) & 0xFF);
   EEPROM.write(EEPROM_FADE_MS_ADDR + 1, simpleFadeMs & 0xFF);
+  EEPROM.commit();
+}
+
+void saveAutoBrightSettings() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR,     EEPROM_AUTO_BRIGHT_MAGIC);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 1, autoBrightEnabled ? 1 : 0);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 2, autoBrightDimVal);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 3, autoBrightPeakVal);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 4, autoBrightDimHour);
+  EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 5, autoBrightPeakHour);
   EEPROM.commit();
 }
 
@@ -1623,11 +1680,46 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 </div>
 
 <div class='card'><h2>Brightness</h2>
+<div id='manualBrightGroup'>
 <div class='form-group' style='margin-bottom:5px'><label>LED Brightness</label>
 <input type='range' id='brightness' min='10' max='255' value='76' oninput='updateBrightnessLabel()' style='width:100%'/></div>
 <div style='text-align:center;font-size:12px;color:#666'>
 <span id='brightLabel'>30%</span> (<span id='brightValue'>76</span>/255)</div>
 <button class='btn btn-secondary' onclick='saveBrightness()'>Save Brightness</button>
+</div>
+<div id='autoBrightNote' style='display:none;font-size:11px;color:#888;margin-top:6px'>Manual slider disabled &mdash; adaptive brightness is active. Current: <span id='effectiveBrPct'>-</span>%</div>
+</div>
+
+<div class='card'><h2>Adaptive Brightness</h2>
+<div class='form-group' style='display:flex;align-items:center;gap:12px'>
+<label style='margin:0'>Off</label>
+<label style='position:relative;display:inline-block;width:48px;height:26px;margin:0'>
+<input type='checkbox' id='autoBrightToggle' style='opacity:0;width:0;height:0' onchange='saveAutoBright()'>
+<span id='autoBrightSlider' style='position:absolute;cursor:pointer;inset:0;background:#ccc;border-radius:26px;transition:.3s'></span>
+</label>
+<label style='margin:0'>On</label>
+</div>
+<div style='font-size:11px;color:#888;margin-top:4px;margin-bottom:12px'>Smoothly dims at night, brightens during day using a cosine curve between dim and peak hours.</div>
+<div id='autoBrightControls'>
+<div class='form-group'>
+<label>Night Brightness (dim) &mdash; <span id='abDimHourLabel'>2</span>:00</label>
+<input type='range' id='abDimHour' min='0' max='23' value='2' oninput='updateAutoBrightLabels()' style='width:100%'/>
+</div>
+<div class='form-group'>
+<label>Day Brightness (peak) &mdash; <span id='abPeakHourLabel'>14</span>:00</label>
+<input type='range' id='abPeakHour' min='0' max='23' value='14' oninput='updateAutoBrightLabels()' style='width:100%'/>
+</div>
+<div class='form-group'>
+<label>Dim value: <span id='abDimPctLabel'>10</span>%</label>
+<input type='range' id='abDimPct' min='0' max='100' value='10' oninput='updateAutoBrightLabels()' style='width:100%'/>
+</div>
+<div class='form-group'>
+<label>Peak value: <span id='abPeakPctLabel'>100</span>%</label>
+<input type='range' id='abPeakPct' min='0' max='100' value='100' oninput='updateAutoBrightLabels()' style='width:100%'/>
+</div>
+<button class='btn btn-secondary' onclick='saveAutoBright()'>Save Adaptive Brightness</button>
+<div style='font-size:11px;color:#888;margin-top:8px'>Effective now: <span id='abEffectivePct'>-</span>%</div>
+</div>
 </div>
 
 <div class='card'><h2>LED Strip Type</h2>
@@ -1745,6 +1837,30 @@ function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:che
 const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
 fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='\u2713 Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='\u2717 Error: '+e;b.className='status-msg status-err';});}
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
+function updateAutoBrightLabels(){
+  document.getElementById('abDimHourLabel').textContent=document.getElementById('abDimHour').value;
+  document.getElementById('abPeakHourLabel').textContent=document.getElementById('abPeakHour').value;
+  document.getElementById('abDimPctLabel').textContent=document.getElementById('abDimPct').value;
+  document.getElementById('abPeakPctLabel').textContent=document.getElementById('abPeakPct').value;
+}
+function saveAutoBright(){
+  const en=document.getElementById('autoBrightToggle').checked?1:0;
+  const dp=document.getElementById('abDimPct').value;
+  const pp=document.getElementById('abPeakPct').value;
+  const dh=document.getElementById('abDimHour').value;
+  const ph=document.getElementById('abPeakHour').value;
+  fetch('/api/autobright?enabled='+en+'&dim_pct='+dp+'&peak_pct='+pp+'&dim_hour='+dh+'&peak_hour='+ph)
+    .then(r=>r.json()).then(d=>{
+      document.getElementById('abEffectivePct').textContent=d.effective_pct;
+      applyAutoBrightUI(en==1);
+    }).catch(e=>console.warn(e));
+}
+function applyAutoBrightUI(enabled){
+  document.getElementById('autoBrightSlider').style.background=enabled?'#4CAF50':'#ccc';
+  document.getElementById('manualBrightGroup').style.opacity=enabled?'0.4':'1';
+  document.getElementById('manualBrightGroup').style.pointerEvents=enabled?'none':'auto';
+  document.getElementById('autoBrightNote').style.display=enabled?'block':'none';
+}
 function saveLedType(){const v=document.getElementById('rgbwToggle').checked?1:0;fetch('/api/ledtype?rgbw='+v).then(r=>r.json()).then(d=>{document.getElementById('rgbwSlider').style.background=d.rgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=d.rgbw?'RGBW':'RGB';}).catch(e=>console.warn(e));}
 function saveLedDirection(){const v=document.getElementById('revToggle').checked?1:0;fetch('/api/leddirection?reversed='+v).then(r=>r.json()).then(d=>{document.getElementById('revSlider').style.background=d.reversed?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=d.reversed?'Reversed':'Normal';}).catch(e=>console.warn(e));}
 function saveDebugConfig(){const ip=document.getElementById('dbgIp').value.trim();const port=document.getElementById('dbgPort').value||'7878';const en=document.getElementById('dbgToggle').checked?1:0;const msg=document.getElementById('dbgMsg');msg.textContent='Saving...';msg.className='status-msg status-info';fetch('/api/debug?enabled='+en+'&ip='+encodeURIComponent(ip)+'&port='+port).then(r=>r.json()).then(d=>{document.getElementById('dbgSlider').style.background=d.enabled?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=d.enabled?'Enabled':'Disabled';msg.textContent='\u2713 Saved';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
@@ -1833,6 +1949,16 @@ if(d.debug_enabled!==undefined){const en=d.debug_enabled===true;document.getElem
 if(d.debug_ip){document.getElementById('dbgIp').value=d.debug_ip;}
 if(d.debug_port){document.getElementById('dbgPort').value=d.debug_port;}
 if(d.simple_fade_ms!==undefined){document.getElementById('fadeMsSlider').value=d.simple_fade_ms;updateFadeMsLabel();}
+if(d.auto_bright_enabled!==undefined){
+  const en=d.auto_bright_enabled===true;
+  document.getElementById('autoBrightToggle').checked=en;
+  applyAutoBrightUI(en);
+}
+if(d.auto_bright_dim_pct!==undefined){document.getElementById('abDimPct').value=d.auto_bright_dim_pct;document.getElementById('abDimPctLabel').textContent=d.auto_bright_dim_pct;}
+if(d.auto_bright_peak_pct!==undefined){document.getElementById('abPeakPct').value=d.auto_bright_peak_pct;document.getElementById('abPeakPctLabel').textContent=d.auto_bright_peak_pct;}
+if(d.auto_bright_dim_hour!==undefined){document.getElementById('abDimHour').value=d.auto_bright_dim_hour;document.getElementById('abDimHourLabel').textContent=d.auto_bright_dim_hour;}
+if(d.auto_bright_peak_hour!==undefined){document.getElementById('abPeakHour').value=d.auto_bright_peak_hour;document.getElementById('abPeakHourLabel').textContent=d.auto_bright_peak_hour;}
+if(d.effective_brightness!==undefined){document.getElementById('abEffectivePct').textContent=d.effective_brightness;document.getElementById('effectiveBrPct').textContent=d.effective_brightness;}
 }).catch(e=>console.warn(e));}
 function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
 document.getElementById('hourWidth').addEventListener('input',updateWidthLabels);
@@ -1847,6 +1973,10 @@ document.getElementById('secondWidth').addEventListener('input',queueModeConfigS
 document.getElementById('spectrum').addEventListener('change',queueModeConfigSave);
 document.getElementById('fadeMsSlider').addEventListener('input',updateFadeMsLabel);
 document.getElementById('fadeMsSlider').addEventListener('change',saveFadeMs);
+['abDimHour','abPeakHour','abDimPct','abPeakPct'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',updateAutoBrightLabels);
+  document.getElementById(id).addEventListener('change',saveAutoBright);
+});
 document.getElementById('hourColor').addEventListener('change',()=>saveModeConfig(true,true));
 document.getElementById('minuteColor').addEventListener('change',()=>saveModeConfig(true,true));
 document.getElementById('secondColor').addEventListener('change',()=>saveModeConfig(true,true));
@@ -1902,6 +2032,12 @@ void setupWebServer() {
     doc["tz_detect_last_success_ms"] = tzDiag.lastSuccessMs;
     doc["tz_detect_response_sample"] = tzDiag.responseSample;
     doc["brightness"] = (ledBrightness * 100) / 255;
+    doc["auto_bright_enabled"]  = autoBrightEnabled;
+    doc["auto_bright_dim_pct"]  = (autoBrightDimVal  * 100) / 255;
+    doc["auto_bright_peak_pct"] = (autoBrightPeakVal * 100) / 255;
+    doc["auto_bright_dim_hour"]  = autoBrightDimHour;
+    doc["auto_bright_peak_hour"] = autoBrightPeakHour;
+    doc["effective_brightness"]  = (autoBrightEnabled ? computeAutoBrightness() : ledBrightness) * 100 / 255;
     doc["led_rgbw"] = ledRgbw;
     doc["led_reversed"] = ledReversed;
     doc["display_mode"] = (int)displayMode;
@@ -2000,6 +2136,25 @@ void setupWebServer() {
       if (ledStrip) ledStrip->setBrightness(ledBrightness);
     }
     req->send(200, "text/plain", "OK");
+  });
+
+  // API: Adaptive brightness settings
+  server.on("/api/autobright", HTTP_GET, [](AsyncWebServerRequest *req) {
+    bool anyParam = false;
+    if (req->hasParam("enabled"))   { autoBrightEnabled  = req->getParam("enabled")->value() == "1"; anyParam = true; }
+    if (req->hasParam("dim_pct"))   { int v = atoi(req->getParam("dim_pct")->value().c_str());  if (v >= 0 && v <= 100) { autoBrightDimVal  = (uint8_t)((v * 255) / 100); anyParam = true; } }
+    if (req->hasParam("peak_pct"))  { int v = atoi(req->getParam("peak_pct")->value().c_str()); if (v >= 0 && v <= 100) { autoBrightPeakVal = (uint8_t)((v * 255) / 100); anyParam = true; } }
+    if (req->hasParam("dim_hour"))  { int v = atoi(req->getParam("dim_hour")->value().c_str());  if (v >= 0 && v < 24 && v != (int)autoBrightPeakHour) { autoBrightDimHour  = (uint8_t)v; anyParam = true; } }
+    if (req->hasParam("peak_hour")) { int v = atoi(req->getParam("peak_hour")->value().c_str()); if (v >= 0 && v < 24 && v != (int)autoBrightDimHour)  { autoBrightPeakHour = (uint8_t)v; anyParam = true; } }
+    if (anyParam) saveAutoBrightSettings();
+    uint8_t effectiveBr = autoBrightEnabled ? computeAutoBrightness() : ledBrightness;
+    String json = String("{\"enabled\":") + (autoBrightEnabled ? "true" : "false") +
+      ",\"dim_pct\":"   + (int)(autoBrightDimVal  * 100 / 255) +
+      ",\"peak_pct\":"  + (int)(autoBrightPeakVal * 100 / 255) +
+      ",\"dim_hour\":"  + autoBrightDimHour +
+      ",\"peak_hour\":" + autoBrightPeakHour +
+      ",\"effective_pct\":" + (int)(effectiveBr * 100 / 255) + "}";
+    req->send(200, "application/json", json);
   });
 
   // API: LED type (RGB / RGBW)
