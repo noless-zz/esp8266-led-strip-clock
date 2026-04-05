@@ -2535,7 +2535,10 @@ void setupWebServer() {
     },
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
       if (index == 0) {
-        Update.runAsync(true);
+        // runAsync(false) = synchronous writes — we feed WDT manually between chunks.
+        // runAsync(true) defers writes to a queue but Update.process() must be called
+        // from loop() to drain it; without that, all writes flush at once in one huge
+        // blocking burst and the lwIP stack crashes (Soft WDT, exccause=4, 0x4024xxxx).
         uint32_t maxSize = getMaxUpdateSize();
         if (!Update.begin(maxSize, U_FLASH)) {
           Serial.println("[OTA] Update begin failed");
@@ -2545,13 +2548,17 @@ void setupWebServer() {
         Serial.print("[OTA] Updating: ");
         Serial.println(filename);
         DLOGI("OTA", "Web upload start  file=%s  heap=%u", filename.c_str(), ESP.getFreeHeap());
+        otaStatus.inProgress = true;
       }
-      
-      if (Update.write(data, len) == len) {} else {
+
+      ESP.wdtFeed();   // keep WDT happy during flash write (each chunk ~1436 B)
+      if (Update.write(data, len) != len) {
         Update.printError(Serial);
       }
-      
+      yield();         // let lwIP process ACKs before the next chunk arrives
+
       if (final) {
+        otaStatus.inProgress = false;
         if (Update.end(true)) {
           Serial.println("\n[OTA] Update Success!");
           DLOGI("OTA", "Web upload SUCCESS  written=%u", (unsigned)Update.progress());
@@ -2803,16 +2810,16 @@ void loop() {
 
   ArduinoOTA.handle();
   
-  // Trigger NTP sync after WiFi connects
-  // Retry NTP every 20s until synced, then every hour
+  // Trigger NTP sync after WiFi connects (skip during OTA — competing TCP traffic)
   bool ntpSynced = (time(nullptr) > 86400);
   unsigned long ntpInterval = ntpSynced ? 3600000UL : 20000UL;
-  if (wifiConnected && millis() - lastNtpSync > ntpInterval) {
+  bool otaActive = otaStatus.inProgress || (pendingDirectUpdateUrl.length() > 0);
+  if (!otaActive && wifiConnected && millis() - lastNtpSync > ntpInterval) {
     syncTimeNTP();
   }
-  
-  // Refresh timezone daily if auto-detected
-  if (wifiConnected && tz.autoDetected && millis() - lastTzCheck > 86400000) {
+
+  // Refresh timezone daily if auto-detected (skip during OTA)
+  if (!otaActive && wifiConnected && tz.autoDetected && millis() - lastTzCheck > 86400000) {
     detectTimezone();
   }
   
