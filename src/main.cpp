@@ -1855,13 +1855,20 @@ btn.disabled=true;st.style.display='block';st.style.color='#888';
 // Snapshot current version so we can verify it changed after reboot
 let _oldVer='';
 fetch('/api/status').then(r=>r.json()).then(s=>{_oldVer=s.fw_version_base||'';}).catch(()=>{});
-// Step 1: browser downloads binary via XHR (better binary/CORS support than fetch for local HTTP pages)
-st.textContent='Downloading firmware from GitHub\u2026';
+// Step 1: download binary. github.com/releases/download/* redirects to objects.githubusercontent.com
+// but github.com doesn't send CORS headers on the 302, so browsers block the XHR at the redirect.
+// Strategy: try direct first; if onerror fires, retry via corsproxy.io which adds CORS headers.
+const CORS_PROXY='https://corsproxy.io/?url=';
+function _doDownload(url,isRetry){
+st.textContent=(isRetry?'Retrying via CORS proxy\u2026':'Downloading firmware from GitHub\u2026');
 const dl=new XMLHttpRequest();
-dl.open('GET',_directUrl,true);
+dl.open('GET',url,true);
 dl.responseType='arraybuffer';
 dl.onprogress=e=>{if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'%';};
-dl.onerror=()=>{st.textContent='\u2717 Download failed (network error)';st.style.color='#c33';btn.disabled=false;};
+dl.onerror=()=>{
+if(!isRetry){st.textContent='Direct download blocked (CORS), retrying via proxy\u2026';st.style.color='#888';_doDownload(CORS_PROXY+encodeURIComponent(_directUrl),true);}
+else{st.textContent='\u2717 Download failed (both direct and proxy)';st.style.color='#c33';btn.disabled=false;}
+};
 dl.onload=()=>{
 if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed: HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
 const buf=dl.response;
@@ -1911,6 +1918,7 @@ x.open('POST','/api/update?approve=1');x.send(fd);
 }).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});
 };
 dl.send();}
+_doDownload(_directUrl,false);}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
