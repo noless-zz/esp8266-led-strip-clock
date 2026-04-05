@@ -1855,17 +1855,21 @@ btn.disabled=true;st.style.display='block';st.style.color='#888';
 // Snapshot current version so we can verify it changed after reboot
 let _oldVer='';
 fetch('/api/status').then(r=>r.json()).then(s=>{_oldVer=s.fw_version_base||'';}).catch(()=>{});
-// Step 1: browser fetches the binary (full TLS on the browser side, no TLS on device)
+// Step 1: browser downloads binary via XHR (better binary/CORS support than fetch for local HTTP pages)
 st.textContent='Downloading firmware from GitHub\u2026';
-fetch(_directUrl).then(r=>{
-if(!r.ok)throw new Error('GitHub download failed: '+r.status);
-return r.blob();
-}).then(blob=>{
+const dl=new XMLHttpRequest();
+dl.open('GET',_directUrl,true);
+dl.responseType='arraybuffer';
+dl.onprogress=e=>{if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'%';};
+dl.onerror=()=>{st.textContent='\u2717 Download failed (network error)';st.style.color='#c33';btn.disabled=false;};
+dl.onload=()=>{
+if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed: HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
+const buf=dl.response;
+const blob=new Blob([buf],{type:'application/octet-stream'});
 // Step 2: pre-check
 st.textContent='Checking firmware ('+Math.round(blob.size/1024)+' KB)\u2026';
-const magic=new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(new Uint8Array(fr.result)[0]);fr.readAsArrayBuffer(blob.slice(0,1));});
-magic.then(m=>{
-return fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+m)
+const firstByte=new Uint8Array(buf,0,1)[0];
+fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+firstByte)
 .then(r=>r.json()).then(d=>{
 if(!d.ok)throw new Error(d.error||'Precheck failed');
 // Step 3: upload binary to device over plain HTTP
@@ -1904,8 +1908,9 @@ if(phase==='wait_offline'){phase='wait_online';st.textContent='Device offline, w
 };
 x.onerror=()=>{st.textContent='\u2717 Upload error';st.style.color='#c33';btn.disabled=false;};
 x.open('POST','/api/update?approve=1');x.send(fd);
-});});
-}).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});}
+}).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});
+};
+dl.send();}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
