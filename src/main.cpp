@@ -77,6 +77,7 @@ const int EEPROM_DBG_MAGIC_ADDR   = 279;   // 1 byte: magic 0xD8
 const int EEPROM_DBG_ENABLED_ADDR = 280;   // 1 byte: 1=enabled
 const int EEPROM_DBG_IP_ADDR      = 281;   // 16 bytes: null-terminated IP string
 const int EEPROM_DBG_PORT_ADDR    = 297;   // 2 bytes: port (big-endian)
+const int EEPROM_FADE_MS_ADDR     = 299;   // 2 bytes: Simple mode fade duration (big-endian, 0=off)
 const uint8_t EEPROM_DBG_MAGIC    = 0xD8;
 const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
 const uint8_t EEPROM_MAGIC = 0xA7;
@@ -497,7 +498,8 @@ static void drawWeightedMarker(int pos, int pixelCount, CRGB color,
 }
 
 // Transition duration in ms — cross-fade when any hand moves to a new LED.
-static const uint32_t SIMPLE_TRANS_MS = 400;
+// 0 = disabled (instant step). Configurable via /api/simple/fade, stored in EEPROM.
+uint32_t simpleFadeMs = 400;
 
 // Per-hand fade state: tracks old/new positions independently of RTC/millis alignment.
 struct HandFade {
@@ -534,10 +536,10 @@ void displayMode_Simple() {
   auto renderHand = [&](HandFade &f, int pixelCount, CRGB color, uint16_t seedBase) {
     uint32_t elapsed = millis() - f.startMs;
     uint8_t wTo, wFrom;
-    if (elapsed >= SIMPLE_TRANS_MS || f.fromPos == f.toPos) {
+    if (simpleFadeMs == 0 || elapsed >= simpleFadeMs || f.fromPos == f.toPos) {
       wTo = 255; wFrom = 0;
     } else {
-      wTo   = (uint8_t)(elapsed * 255 / SIMPLE_TRANS_MS);
+      wTo   = (uint8_t)(elapsed * 255 / simpleFadeMs);
       wFrom = 255 - wTo;
     }
     drawWeightedMarker(f.toPos,   pixelCount, color, wTo,   seedBase, cfg.spectrum);
@@ -957,6 +959,21 @@ void loadEEPROMSettings() {
     uint16_t p = (pHi << 8) | pLo;
     if (p > 0 && p < 65535) debugServerPort = p;
   }
+
+  // Load Simple fade duration (0=off, 50–2000ms valid range)
+  {
+    uint16_t fHi = EEPROM.read(EEPROM_FADE_MS_ADDR);
+    uint16_t fLo = EEPROM.read(EEPROM_FADE_MS_ADDR + 1);
+    uint16_t fms = (fHi << 8) | fLo;
+    if (fms <= 2000) simpleFadeMs = fms;  // 0 = disabled, up to 2000ms
+  }
+}
+
+void saveFadeMs() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_FADE_MS_ADDR,     (simpleFadeMs >> 8) & 0xFF);
+  EEPROM.write(EEPROM_FADE_MS_ADDR + 1, simpleFadeMs & 0xFF);
+  EEPROM.commit();
 }
 
 void saveDebugConfig() {
@@ -1595,6 +1612,11 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <option value='2'>Pulse glow</option>
 </select>
 </div>
+<div class='form-group' id='fadeGroup'>
+<label>Simple HMS Transition Speed</label>
+<input type='range' id='fadeMsSlider' min='0' max='2000' step='50' value='400' oninput='updateFadeMsLabel()' style='width:100%'/>
+<div style='font-size:10px;color:#777'><span id='fadeMsLabel'>400</span> ms &nbsp;(0 = instant / no fade)</div>
+</div>
 <button class='btn btn-secondary' onclick='saveModeConfig()'>Save Mode Visuals</button>
 <button class='btn btn-secondary' onclick='resetModeConfig()' style='margin-top:8px;background:#f8f8f8;border:1px solid #ddd;color:#555'>Reset Current Mode to Default</button>
 <div class='status-msg' id='modeCfgMsg'></div>
@@ -1769,6 +1791,8 @@ msg.textContent='Resetting mode visuals...';msg.className='status-msg status-inf
 fetch('/api/mode/config?reset=1&persist=1&mode='+m).then(r=>r.json()).then(d=>{
 if(d&&d.ok){msg.textContent='\u2713 Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='\u2717 '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
 }).catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
+function updateFadeMsLabel(){const v=document.getElementById('fadeMsSlider').value;document.getElementById('fadeMsLabel').textContent=v;}
+function saveFadeMs(){const ms=document.getElementById('fadeMsSlider').value;fetch('/api/simple/fade?ms='+ms).catch(e=>console.warn(e));}
 function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();loadModeConfig();}
 function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
 const desc={0:'Rainbow orbit background with clear red hour, green minute, and blue second markers (5-3-7 LED spread).',
@@ -1808,6 +1832,7 @@ if(d.led_reversed!==undefined){const isRev=d.led_reversed===true;document.getEle
 if(d.debug_enabled!==undefined){const en=d.debug_enabled===true;document.getElementById('dbgToggle').checked=en;document.getElementById('dbgSlider').style.background=en?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=en?'Enabled':'Disabled';}
 if(d.debug_ip){document.getElementById('dbgIp').value=d.debug_ip;}
 if(d.debug_port){document.getElementById('dbgPort').value=d.debug_port;}
+if(d.simple_fade_ms!==undefined){document.getElementById('fadeMsSlider').value=d.simple_fade_ms;updateFadeMsLabel();}
 }).catch(e=>console.warn(e));}
 function getMaxSize(){fetch('/api/status').then(r=>r.json()).then(d=>{document.getElementById('maxSize').textContent=(d.heap||262144).toString();}).catch(e=>console.warn(e));}
 document.getElementById('hourWidth').addEventListener('input',updateWidthLabels);
@@ -1820,6 +1845,8 @@ document.getElementById('hourWidth').addEventListener('input',queueModeConfigSav
 document.getElementById('minuteWidth').addEventListener('input',queueModeConfigSave);
 document.getElementById('secondWidth').addEventListener('input',queueModeConfigSave);
 document.getElementById('spectrum').addEventListener('change',queueModeConfigSave);
+document.getElementById('fadeMsSlider').addEventListener('input',updateFadeMsLabel);
+document.getElementById('fadeMsSlider').addEventListener('change',saveFadeMs);
 document.getElementById('hourColor').addEventListener('change',()=>saveModeConfig(true,true));
 document.getElementById('minuteColor').addEventListener('change',()=>saveModeConfig(true,true));
 document.getElementById('secondColor').addEventListener('change',()=>saveModeConfig(true,true));
@@ -1916,6 +1943,7 @@ void setupWebServer() {
     doc["debug_enabled"] = debugRemoteEnabled;
     doc["debug_ip"] = debugServerIp;
     doc["debug_port"] = debugServerPort;
+    doc["simple_fade_ms"] = simpleFadeMs;
     String json;
     serializeJson(doc, json);
     req->send(200, "application/json", json);
@@ -2030,6 +2058,19 @@ void setupWebServer() {
     }
     String json = String("{\"enabled\":") + (debugRemoteEnabled ? "true" : "false") +
                   ",\"ip\":\"" + debugServerIp + "\",\"port\":" + debugServerPort + "}";
+    req->send(200, "application/json", json);
+  });
+
+  // API: Simple mode fade duration  (?ms=400 to set, no params to read)
+  server.on("/api/simple/fade", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (req->hasParam("ms")) {
+      int ms = atoi(req->getParam("ms")->value().c_str());
+      if (ms >= 0 && ms <= 2000) {
+        simpleFadeMs = (uint32_t)ms;
+        saveFadeMs();
+      }
+    }
+    String json = String("{\"fade_ms\":") + simpleFadeMs + "}";
     req->send(200, "application/json", json);
   });
 

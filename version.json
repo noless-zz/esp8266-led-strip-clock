@@ -1,8 +1,8 @@
 {
   "major": 2,
   "patch": 0,
-  "build": 3,
+  "build": 2,
   "_note": "major: manual bump for architecture changes. patch: manual bump for releases. minor and build are auto-managed.",
-  "_minor_last": 33,
-  "_git_hash_last": "ff194b6"
+  "_minor_last": 34,
+  "_git_hash_last": "8581b06"
 }
