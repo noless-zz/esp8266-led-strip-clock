@@ -75,20 +75,23 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           HASH="${{ steps.version.outputs.git_hash }}"
           COMMIT_MSG=$(git log -1 --pretty=%s)
+          {
+            echo "**Version:** \`$VERSION\`"
+            echo "**Commit:** \`$HASH\` — $COMMIT_MSG"
+            echo ""
+            echo "### Flash via Web UI"
+            echo "1. Download \`firmware.bin\` from this release"
+            echo "2. Open the device web UI → Firmware Update"
+            echo "3. Select the \`firmware.bin\` file and upload"
+            echo ""
+            echo "### Flash via OTA (PlatformIO)"
+            echo "\`\`\`"
+            echo "pio run -e d1_mini_ota -t upload"
+            echo "\`\`\`"
+          } > /tmp/release_notes.md
           gh release create "$TAG" \
             dist/firmware.bin \
             dist/firmware.elf \
             --title "Firmware $VERSION" \
-            --notes "**Version:** \`$VERSION\`
-**Commit:** \`$HASH\` — $COMMIT_MSG
-
-### Flash via Web UI
-1. Download \`firmware.bin\` from this release
-2. Open the device web UI → Firmware Update
-3. Select the \`firmware.bin\` file and upload
-
-### Flash via OTA (PlatformIO)
-\`\`\`
-pio run -e d1_mini_ota -t upload
-\`\`\`" \
+            --notes-file /tmp/release_notes.md \
             --latest
