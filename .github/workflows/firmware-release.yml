@@ -27,8 +27,11 @@ jobs:
 
       - name: Build firmware (d1_mini env)
         run: pio run -e d1_mini
-        # Uses serial-upload env so no OTA credentials are required in CI.
+        # Uses serial-upload env so no OTA credentials are needed in CI.
         # The resulting firmware.bin is identical for both envs (same build flags).
+        # CI=1 is set so scripts can detect CI environment if needed.
+        env:
+          CI: "1"
 
       - name: Read version
         id: version

@@ -146,4 +146,5 @@ def _after_upload(*args, **kwargs):
         env_obj.Exit(1)
 
 
-env.AddPostAction("upload", _after_upload)
+if not os.getenv("CI"):
+    env.AddPostAction("upload", _after_upload)
