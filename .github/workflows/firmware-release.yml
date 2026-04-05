@@ -1,0 +1,94 @@
+name: Firmware Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # needed to create releases and upload assets
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git rev-list --count gives correct minor version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware (d1_mini env)
+        run: pio run -e d1_mini
+        # Uses serial-upload env so no OTA credentials are required in CI.
+        # The resulting firmware.bin is identical for both envs (same build flags).
+
+      - name: Read version
+        id: version
+        run: |
+          python - <<'EOF'
+          import json, subprocess, os
+          with open("version.json") as f:
+              v = json.load(f)
+          major = v["major"]
+          patch = v["patch"]
+          minor = int(subprocess.check_output(["git","rev-list","--count","HEAD"]).strip())
+          git_hash = subprocess.check_output(["git","rev-parse","--short","HEAD"]).strip().decode()
+          build = v.get("build", 1)
+          version_str = f"{major}.{minor}.{patch}+{build}"
+          tag = f"v{major}.{minor}.{patch}"
+          print(f"VERSION={version_str}")
+          print(f"TAG={tag}")
+          print(f"GIT_HASH={git_hash}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version_str}\n")
+              out.write(f"tag={tag}\n")
+              out.write(f"git_hash={git_hash}\n")
+          EOF
+
+      - name: Copy artifacts
+        run: |
+          mkdir -p dist
+          cp .pio/build/d1_mini/firmware.bin dist/firmware.bin
+          cp .pio/build/d1_mini/firmware.elf dist/firmware.elf
+
+      - name: Delete existing release/tag (if same tag exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push --delete origin "$TAG" 2>/dev/null || true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          HASH="${{ steps.version.outputs.git_hash }}"
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          gh release create "$TAG" \
+            dist/firmware.bin \
+            dist/firmware.elf \
+            --title "Firmware $VERSION" \
+            --notes "**Version:** \`$VERSION\`
+**Commit:** \`$HASH\` — $COMMIT_MSG
+
+### Flash via Web UI
+1. Download \`firmware.bin\` from this release
+2. Open the device web UI → Firmware Update
+3. Select the \`firmware.bin\` file and upload
+
+### Flash via OTA (PlatformIO)
+\`\`\`
+pio run -e d1_mini_ota -t upload
+\`\`\`" \
+            --latest

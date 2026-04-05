@@ -1768,8 +1768,17 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 </div>
 
 <div class='card'><h2>Firmware Update</h2>
+<div style='margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap'>
+<button class='btn btn-secondary' onclick='checkForUpdate()' id='checkUpdateBtn' style='padding:6px 14px;font-size:13px'>Check for Update</button>
+<span id='updateStatus' style='font-size:12px;color:#888'></span>
+</div>
+<div id='updateInfo' style='display:none;margin-bottom:10px;padding:8px 10px;background:#f0f8ff;border:1px solid #b3d9ff;border-radius:6px;font-size:12px'>
+<div>Latest: <strong id='latestTag'>-</strong> <a id='releaseLink' href='#' target='_blank' style='color:#2779bd;font-size:11px'>(view release)</a></div>
+<div style='margin-top:4px'>Diff from <span id='currentHashSpan' style='font-family:monospace'></span>: <a id='diffLink' href='#' target='_blank' style='color:#2779bd'>compare on GitHub</a></div>
+<div style='margin-top:6px'><a id='downloadLink' href='#' target='_blank' style='color:#2779bd;font-weight:bold'>Download firmware.bin</a></div>
+</div>
 <div class='upload-area' onclick='document.getElementById("fwFile").click()' id='uploadArea'>
-<p id='fileName'>ðŸ" Click to select .bin firmware file</p>
+<p id='fileName'>Click to select .bin firmware file</p>
 <input type='file' id='fwFile' accept='.bin' style='display:none' onchange='fileSelected(this)'>
 </div>
 <button class='upload-btn' id='uploadBtn' onclick='uploadFirmware()' disabled>Upload Firmware</button>
@@ -1812,6 +1821,26 @@ x.upload.addEventListener('progress',(e)=>{if(e.lengthComputable)pf.style.width=
 x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='\u2713 Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='\u2717 '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='\u2717 Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
 x.addEventListener('error',()=>{uploading=false;sb.textContent='\u2717 Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
 x.open('POST','/api/update?approve=1');x.send(fd);}
+function checkForUpdate(){const btn=document.getElementById('checkUpdateBtn');const st=document.getElementById('updateStatus');const info=document.getElementById('updateInfo');
+btn.disabled=true;st.textContent='Checking...';st.style.color='#888';
+fetch('/api/status').then(r=>r.json()).then(d=>{
+const currentVer=d.fw_version_base||'';const currentHash=d.fw_git_hash||'';
+document.getElementById('currentHashSpan').textContent=currentHash;
+fetch('https://api.github.com/repos/noless-zz/esp8266-led-strip-clock/releases/latest',{headers:{'Accept':'application/vnd.github+json'}})
+.then(r=>r.json()).then(rel=>{
+const tag=rel.tag_name||'';const releaseUrl=rel.html_url||'#';
+document.getElementById('latestTag').textContent=tag+' ('+currentVer+' on device)';
+document.getElementById('releaseLink').href=releaseUrl;
+if(currentHash){document.getElementById('diffLink').href='https://github.com/noless-zz/esp8266-led-strip-clock/compare/'+currentHash+'...'+tag;}
+const asset=(rel.assets||[]).find(a=>a.name==='firmware.bin');
+if(asset){document.getElementById('downloadLink').href=asset.browser_download_url;}else{document.getElementById('downloadLink').style.display='none';}
+info.style.display='block';
+const upToDate=tag==='v'+currentVer.split('+')[0];
+if(upToDate){st.textContent='\u2713 Up to date ('+tag+')';st.style.color='#3a3';}
+else{st.textContent='\u25b2 Update available: '+tag;st.style.color='#c80';}
+btn.disabled=false;
+}).catch(e=>{st.textContent='GitHub error: '+e;st.style.color='#c33';btn.disabled=false;});
+}).catch(e=>{st.textContent='Device error: '+e;st.style.color='#c33';btn.disabled=false;});}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
