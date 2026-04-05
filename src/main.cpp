@@ -247,7 +247,7 @@ void captureBootInfo() {
   // Format last uptime as h:mm:ss
   char uptimeBuf[24];
   if (rtcValid) {
-    snprintf(uptimeBuf, sizeof(uptimeBuf), "%luh%02lum%02lus",
+    snprintf(uptimeBuf, sizeof(uptimeBuf), "%uh%02um%02us",
              lastUptime_s / 3600, (lastUptime_s % 3600) / 60, lastUptime_s % 60);
   } else {
     snprintf(uptimeBuf, sizeof(uptimeBuf), "unknown (power-on)");
@@ -267,7 +267,7 @@ void captureBootInfo() {
     cachedBootInfo = String(reason);
   }
 
-  Serial.printf("[BOOT] #%lu  last_uptime=%s  %s\n",
+  Serial.printf("[BOOT] #%u  last_uptime=%s  %s\n",
                 bootCount, uptimeBuf, cachedBootInfo.c_str());
 }
 
@@ -600,7 +600,7 @@ void displayMode_Pulse() {
   // Very dim background pulse (reduced from previous)
   for (int i = 0; i < NUM_LEDS; i++) {
     uint8_t base = 5 + beat / 8;
-    leds[i] = {base / 4, base / 3, base / 2};
+    leds[i] = {(uint8_t)(base / 4), (uint8_t)(base / 3), (uint8_t)(base / 2)};
   }
 
   // Clear HMS markers with more contrast
@@ -662,7 +662,7 @@ void displayMode_HourMarker() {
 
   for (int i = 0; i < NUM_LEDS; i++) {
     uint8_t base = (i <= minute) ? 40 : 12;
-    leds[i] = {base / 4, base, base / 2};
+    leds[i] = {(uint8_t)(base / 4), base, (uint8_t)(base / 2)};
   }
 
   overlayTimeMarkers(hour12, minute, second, cfg, 9);
@@ -1053,11 +1053,11 @@ void saveEEPROMSettings(const String& ssid, const String& pass) {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
   
-  for (int i = 0; i < MAX_SSID_LEN; i++) {
+  for (unsigned int i = 0; i < MAX_SSID_LEN; i++) {
     EEPROM.write(EEPROM_SSID_ADDR + i, i < ssid.length() ? ssid[i] : 0);
   }
-  
-  for (int i = 0; i < MAX_PASS_LEN; i++) {
+
+  for (unsigned int i = 0; i < MAX_PASS_LEN; i++) {
     EEPROM.write(EEPROM_PASS_ADDR + i, i < pass.length() ? pass[i] : 0);
   }
   
@@ -1143,7 +1143,7 @@ void detectTimezone() {
       line = client.readStringUntil('\n');
       if (line.startsWith("HTTP/")) {
         int sp = line.indexOf(' ');
-        if (sp > 0 && sp + 4 <= line.length()) {
+        if (sp > 0 && (unsigned int)(sp + 4) <= line.length()) {
           tzDiag.httpCode = line.substring(sp + 1, sp + 4).toInt();
         }
       }
@@ -1178,7 +1178,7 @@ void detectTimezone() {
 
     tzDiag.responseSample = body.substring(0, 160);
 
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, body);
     if (error) {
       tzDiag.status = "error";
@@ -1296,7 +1296,7 @@ void checkWiFi() {
 // ============================================================================
 
 String getWifiScanJson() {
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   JsonArray arr = doc["networks"].to<JsonArray>();
   
   int scanState = WiFi.scanComplete();
@@ -2069,7 +2069,7 @@ void setupWebServer() {
   
   // API: Status
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *req) {
-    DynamicJsonDocument doc(1408);
+    JsonDocument doc;
     time_t now = time(nullptr);
     struct tm* t = localtime(&now);
     String fullVersion = String(FW_VERSION_BASE) + " (" + FW_BUILD_TIME + ")";
@@ -2158,7 +2158,7 @@ void setupWebServer() {
   
   // API: WiFi Connect
   server.on("/api/wifi/connect", HTTP_GET, [](AsyncWebServerRequest *req) {
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     
     if (req->hasParam("ssid")) {
       String ssid = req->getParam("ssid")->value();
@@ -2316,7 +2316,7 @@ void setupWebServer() {
 
   // API: Display Mode
   server.on("/api/display", HTTP_GET, [](AsyncWebServerRequest *req) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     doc["current_mode"] = displayMode;
     doc["available_modes"]["SOLID"] = DISPLAY_SOLID;
     doc["available_modes"]["SIMPLE"] = DISPLAY_SIMPLE;
@@ -2362,7 +2362,7 @@ void setupWebServer() {
 
   // API: Display Mode Configuration (per mode, persistent)
   server.on("/api/mode/config", HTTP_GET, [](AsyncWebServerRequest *req) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
 
     int mode = (int)displayMode;
     if (req->hasParam("mode")) {
@@ -2492,7 +2492,7 @@ void setupWebServer() {
   
   // API: OTA Precheck
   server.on("/api/update/precheck", HTTP_GET, [](AsyncWebServerRequest *req) {
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     if (!req->hasParam("name") || !req->hasParam("size") || !req->hasParam("magic")) {
       doc["ok"] = false;
       doc["error"] = "Missing parameters";
