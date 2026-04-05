@@ -478,13 +478,76 @@ void overlayTimeMarkers(int hour12, int minute, int second, const ModeDisplayCon
   }
 }
 
+// Draw a marker centered at `pos`, optionally cross-fading to `nextPos`.
+// wCur/wNext are 0..255 brightness weights — caller controls the blend.
+// Marker size stays at pixelCount throughout; no spatial extension.
+static void drawWeightedMarker(int pos, int pixelCount, CRGB color,
+                                uint8_t weight, uint16_t seedBase, uint8_t spectrum) {
+  if (weight == 0) return;
+  int half = pixelCount / 2;
+  int maxDist = max(half, pixelCount - 1 - half);
+  for (int j = 0; j < pixelCount; j++) {
+    int offset = j - half;
+    int dist = abs(offset);
+    uint8_t level = maxDist > 0 ? (uint8_t)(255 - dist * 190 / maxDist) : 255;
+    uint8_t scaled = (uint8_t)((uint16_t)level * weight / 255);
+    CRGB col = blendSpectrumColor(color, spectrum, scaled, (uint16_t)(seedBase + j * 19));
+    addPixelWrap(pos + offset, col.r, col.g, col.b);
+  }
+}
+
+// Transition duration in ms — cross-fade when any hand moves to a new LED.
+static const uint32_t SIMPLE_TRANS_MS = 400;
+
+// Per-hand fade state: tracks old/new positions independently of RTC/millis alignment.
+struct HandFade {
+  int    fromPos  = -1;
+  int    toPos    = -1;
+  uint32_t startMs = 0;
+};
+static HandFade fadeS, fadeM, fadeH;
+
+// Update fade state when a hand moves to a new position.
+static void updateFade(HandFade &f, int newPos) {
+  if (f.toPos == newPos) return;           // same position, nothing to do
+  f.fromPos = (f.toPos < 0) ? newPos : f.toPos;  // on first call, no fade
+  f.toPos   = newPos;
+  f.startMs = millis();
+}
+
 void displayMode_Simple() {
   int hour12, hour24, minute, second, daySeconds;
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
   const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_SIMPLE];
 
+  int secPos  = second % NUM_LEDS;
+  int minPos  = minute % NUM_LEDS;
+  int hourPos = (hour12 * 5 + minute / 12) % NUM_LEDS;
+
+  updateFade(fadeS, secPos);
+  updateFade(fadeM, minPos);
+  updateFade(fadeH, hourPos);
+
   memset(leds, 0, sizeof(leds));
-  overlayTimeMarkers(hour12, minute, second, cfg, 0);
+
+  // For each hand: compute fade weights from the independent per-hand timer
+  auto renderHand = [&](HandFade &f, int pixelCount, CRGB color, uint16_t seedBase) {
+    uint32_t elapsed = millis() - f.startMs;
+    uint8_t wTo, wFrom;
+    if (elapsed >= SIMPLE_TRANS_MS || f.fromPos == f.toPos) {
+      wTo = 255; wFrom = 0;
+    } else {
+      wTo   = (uint8_t)(elapsed * 255 / SIMPLE_TRANS_MS);
+      wFrom = 255 - wTo;
+    }
+    drawWeightedMarker(f.toPos,   pixelCount, color, wTo,   seedBase, cfg.spectrum);
+    drawWeightedMarker(f.fromPos, pixelCount, color, wFrom, seedBase, cfg.spectrum);
+  };
+
+  renderHand(fadeS, cfg.secondWidth, CRGB{cfg.secondR, cfg.secondG, cfg.secondB}, 220);
+  renderHand(fadeM, cfg.minuteWidth, CRGB{cfg.minuteR, cfg.minuteG, cfg.minuteB}, 120);
+  renderHand(fadeH, cfg.hourWidth,   CRGB{cfg.hourR,   cfg.hourG,   cfg.hourB},   40);
+
   applyBrightnessAndShow();
 }
 
