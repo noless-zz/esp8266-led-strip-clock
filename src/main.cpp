@@ -630,6 +630,7 @@ enum BootStage {
   BOOT_STAGE_STA_CONN = 3,  // STA connecting        --" blue,   LEDs 0-59
   BOOT_STAGE_WIFI_OK  = 4,  // WiFi connected        --" green,  fill 60
   BOOT_STAGE_NTP_WAIT = 5,  // waiting for NTP       --" cyan,   full bounce
+  BOOT_STAGE_RUNNING  = 6,  // fully operational     --" clock displayed
 };
 BootStage bootStage = BOOT_STAGE_INIT;
 
@@ -937,13 +938,15 @@ void saveEEPROMSettings(const String& ssid, const String& pass) {
 
 void syncTimeNTP() {
   if (!wifiConnected) return;
-  bootStage = BOOT_STAGE_NTP_WAIT;
+  // Only show NTP_WAIT animation during initial boot (not on hourly refreshes)
+  if (bootStage < BOOT_STAGE_RUNNING) bootStage = BOOT_STAGE_NTP_WAIT;
   Serial.println("[NTP] Syncing with " + String(NTP_SERVER));
   configTime(tz.utcOffset, 0, NTP_SERVER);
   time_t now = time(nullptr);
   int attempts = 50;
   while (now < 86400 && attempts-- > 0) { delay(100); now = time(nullptr); }
   if (now > 86400) {
+    bootStage = BOOT_STAGE_RUNNING;
     Serial.println("[NTP] Time synced");
     DLOGI("NTP", "Synced  epoch=%lu  tz=%s  heap=%u", (unsigned long)now, tz.name.c_str(), ESP.getFreeHeap());
   } else {
@@ -1375,7 +1378,8 @@ h3{font-size:14px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-
 <div class='stage-pip' id='pip2' title='Scanning'></div>
 <div class='stage-pip' id='pip3' title='Connecting'></div>
 <div class='stage-pip' id='pip4' title='WiFi OK'></div>
-<div class='stage-pip' id='pip5' title='NTP'></div>
+<div class='stage-pip' id='pip5' title='NTP Sync'></div>
+<div class='stage-pip' id='pip6' title='Running'></div>
 </div>
 <div style='display:flex;gap:8px;margin-top:12px'>
 <button class='btn-sm btn-clock' style='flex:1' onclick='setRingMode(1)'>Show Clock</button>
@@ -1399,7 +1403,7 @@ h3{font-size:14px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-
 <button class='btn' onclick='location.href="/settings.html"'>Settings</button>
 </div>
 <script>
-const STAGE_NAMES=['Booting','AP Ready','Scanning','Connecting','WiFi OK','NTP Wait'];
+const STAGE_NAMES=['Booting','AP Ready','Scanning','Connecting','WiFi OK','NTP Wait','Running'];
 const MODE_NAMES=['Solid','Simple','Pulse','Binary','HourMark','Flame','Pastel','Neon','Comet'];
 function setRingMode(v){fetch('/api/ring?force_clock='+v).then(r=>r.json()).then(d=>{updateRingUI(d);}).catch(e=>console.warn(e));}
 function updateRingUI(d){
@@ -1408,7 +1412,7 @@ function updateRingUI(d){
   badge.textContent=isClock?'CLOCK':'STATUS';badge.className='ring-badge '+(isClock?'badge-clock':'badge-status');
   document.getElementById('stageName').textContent=d.boot_stage_name||'--';
   const stage=d.boot_stage||0;
-  for(let i=0;i<6;i++){const p=document.getElementById('pip'+i);p.className='stage-pip'+(i<stage?' done':i===stage?' active':'');}
+  for(let i=0;i<7;i++){const p=document.getElementById('pip'+i);if(p)p.className='stage-pip'+(i<stage?' done':i===stage?' active':'');}
 }
 function updateStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
   const now=new Date();
@@ -1812,8 +1816,19 @@ void setupWebServer() {
     doc["led_reversed"] = ledReversed;
     doc["display_mode"] = (int)displayMode;
     doc["boot_stage"] = (int)bootStage;
-    const char* stageNames[] = {"Booting","AP Ready","Scanning","Connecting","WiFi OK","NTP Wait"};
-    doc["boot_stage_name"] = bootStage <= BOOT_STAGE_NTP_WAIT ? stageNames[(int)bootStage] : "Done";
+    bool _ntpSynced = (now >= 86400);
+    unsigned long _ntpInterval = _ntpSynced ? 3600UL : 20UL;
+    unsigned long _ntpAge = min((millis() - lastNtpSync) / 1000, _ntpInterval);
+    int _ntpPct = (int)((_ntpAge * 100) / _ntpInterval);
+    const char* stageNames[] = {"Booting","AP Ready","Scanning","Connecting","WiFi OK","NTP Wait","Running"};
+    if (bootStage == BOOT_STAGE_RUNNING) {
+      char stageBuf[48];
+      snprintf(stageBuf, sizeof(stageBuf), "Running (NTP %s, refresh %d%%)",
+               _ntpSynced ? "OK" : "fail", _ntpPct);
+      doc["boot_stage_name"] = stageBuf;
+    } else {
+      doc["boot_stage_name"] = bootStage <= BOOT_STAGE_RUNNING ? stageNames[(int)bootStage] : "Unknown";
+    }
     bool clockShowing = ((now >= 86400) || forceClockDisplay) && !forceStatusDisplay;
     doc["ring_mode"] = clockShowing ? "clock" : "status";
     doc["ring_force_clock"] = forceClockDisplay;
@@ -1964,10 +1979,11 @@ void setupWebServer() {
     }
     bool ntpSynced = (time(nullptr) >= 86400);
     bool clockShowing = (ntpSynced || forceClockDisplay) && !forceStatusDisplay;
-    const char* stageNames[] = {"Booting","AP Ready","Scanning","Connecting","WiFi OK","NTP Wait"};
+    const char* stageNames[] = {"Booting","AP Ready","Scanning","Connecting","WiFi OK","NTP Wait","Running"};
+    const char* stageName = bootStage <= BOOT_STAGE_RUNNING ? stageNames[(int)bootStage] : "Unknown";
     String json = String("{\"ring_mode\":\"") + (clockShowing ? "clock" : "status") +
                   "\",\"boot_stage\":" + (int)bootStage +
-                  ",\"boot_stage_name\":\"" + (bootStage <= BOOT_STAGE_NTP_WAIT ? stageNames[(int)bootStage] : "Done") +
+                  ",\"boot_stage_name\":\"" + stageName +
                   "\",\"force_clock\":" + (forceClockDisplay ? "true" : "false") +
                   ",\"force_status\":" + (forceStatusDisplay ? "true" : "false") + "}";
     req->send(200, "application/json", json);

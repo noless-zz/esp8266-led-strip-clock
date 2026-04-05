@@ -50,11 +50,14 @@ with open(VERSION_FILE, "r") as f:
 
 major     = int(v.get("major", 1))
 patch     = int(v.get("patch", 0))
-build     = int(v.get("build", 0)) + 1
 minor     = _git_commit_count()   # always derived from git
 git_hash  = _git_short_hash()
 
-# Persist incremented build counter
+# Reset build counter when a new commit lands (minor increased)
+prev_minor = int(v.get("_minor_last", minor))
+build = 1 if minor != prev_minor else int(v.get("build", 0)) + 1
+
+# Persist
 v["build"]          = build
 v["_minor_last"]    = minor
 v["_git_hash_last"] = git_hash
