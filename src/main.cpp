@@ -1855,22 +1855,37 @@ btn.disabled=true;st.style.display='block';st.style.color='#888';
 // Snapshot current version so we can verify it changed after reboot
 let _oldVer='';
 fetch('/api/status').then(r=>r.json()).then(s=>{_oldVer=s.fw_version_base||'';}).catch(()=>{});
-// Step 1: download binary. github.com/releases/download/* redirects to objects.githubusercontent.com
-// but github.com doesn't send CORS headers on the 302, so browsers block the XHR at the redirect.
-// Strategy: try direct first; if onerror fires, retry via corsproxy.io which adds CORS headers.
-const CORS_PROXY='https://corsproxy.io/?url=';
-function _doDownload(url,isRetry){
-st.textContent=(isRetry?'Retrying via CORS proxy\u2026':'Downloading firmware from GitHub\u2026');
-const dl=new XMLHttpRequest();
-dl.open('GET',url,true);
-dl.responseType='arraybuffer';
-dl.onprogress=e=>{if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'%';};
-dl.onerror=()=>{
-if(!isRetry){st.textContent='Direct download blocked (CORS), retrying via proxy\u2026';st.style.color='#888';_doDownload(CORS_PROXY+encodeURIComponent(_directUrl),true);}
-else{st.textContent='\u2717 Download failed (both direct and proxy)';st.style.color='#c33';btn.disabled=false;}
-};
-dl.onload=()=>{
-if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed: HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
+// Step 1: download binary.
+// github.com/releases/download/* redirects to objects.githubusercontent.com but github.com
+// does not send CORS headers on the 302, so browsers block direct XHR at the redirect step.
+// GitHub also blocks known public proxy IPs (corsproxy.io etc) with 403.
+// Strategy: try a chain of proxies; if all fail, show manual instructions.
+const _proxies=[
+  '',  // direct (works if browser already resolved CDN URL)
+  'https://api.allorigins.win/raw?url=',
+  'https://corsproxy.io/?url=',
+  'https://thingproxy.freeboard.io/fetch/',
+];
+let _proxyIdx=0;
+function _showManualFallback(){
+  st.innerHTML='GitHub blocks auto-download via CORS. '
+    +'<strong>Use the Download button above</strong>, then select the saved .bin file '
+    +'using the file picker below and click Upload Firmware.';
+  st.style.color='#a05000';btn.disabled=false;
+}
+function _doDownload(){
+  if(_proxyIdx>=_proxies.length){_showManualFallback();return;}
+  const proxy=_proxies[_proxyIdx++];
+  const url=proxy?proxy+encodeURIComponent(_directUrl):_directUrl;
+  st.textContent=(proxy?'Trying proxy ('+(proxy.split('/')[2])+')\u2026':'Downloading firmware\u2026');
+  const dl=new XMLHttpRequest();
+  dl.open('GET',url,true);
+  dl.responseType='arraybuffer';
+  dl.onprogress=e=>{if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'%';};
+  dl.onerror=()=>{st.textContent='Proxy blocked, trying next\u2026';st.style.color='#888';_doDownload();};
+  dl.onload=()=>{
+  if(dl.status===403||dl.status===0){st.textContent='Proxy returned '+dl.status+', trying next\u2026';st.style.color='#888';_doDownload();return;}
+  if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed: HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
 const buf=dl.response;
 const blob=new Blob([buf],{type:'application/octet-stream'});
 // Step 2: pre-check
@@ -1918,7 +1933,7 @@ x.open('POST','/api/update?approve=1');x.send(fd);
 }).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});
 };
 dl.send();}
-_doDownload(_directUrl,false);}
+_doDownload();}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
@@ -2602,14 +2617,15 @@ void setupWebServer() {
         otaStatus.inProgress = true;
       }
 
-      ESP.wdtFeed();   // keep WDT happy during flash write (each chunk ~1436 B)
+      // This callback runs in the lwIP/system context — yield() is illegal here and panics
+      // ("Panic core_esp8266_main.cpp __yield  ctx: sys"). wdtFeed() is safe in any context.
+      ESP.wdtFeed();
       size_t written = Update.write(data, len);
       if (written != len) {
         DLOGE("OTA", "Web upload write FAILED  offset=%u  want=%u  got=%u  errStr=%s",
               (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString());
         Update.printError(Serial);
       }
-      yield();         // let lwIP process ACKs before the next chunk arrives
 
       // Log progress every ~64 KB
       static uint32_t _lastLoggedKB = 0;
