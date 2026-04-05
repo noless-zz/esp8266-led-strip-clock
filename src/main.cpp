@@ -2799,6 +2799,10 @@ void loop() {
     client.setInsecure();  // skip cert check — URL came from our own UI / GitHub release
     ESPhttpUpdate.setLedPin(LED_BUILTIN, LOW);
     ESPhttpUpdate.rebootOnUpdate(true);
+    // GitHub release URLs 301-redirect to the CDN (objects.githubusercontent.com).
+    // Without FORCE_FOLLOW_REDIRECTS the library downloads the tiny HTML redirect page,
+    // "flashes" it, reboots, and the bootloader correctly rejects it.
+    ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
     t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
     if (ret != HTTP_UPDATE_OK) {
       lastDirectUpdateError = ESPhttpUpdate.getLastErrorString();
