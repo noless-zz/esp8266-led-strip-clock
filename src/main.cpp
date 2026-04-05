@@ -1536,7 +1536,7 @@ h3{font-size:14px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-
 <div class='card'><h3>Device</h3><div class='grid'>
 <div class='item'><div class='label'>Firmware</div><div class='value' id='fw' title='Build timestamp' style='cursor:help;font-size:11px'>-</div></div>
 <div class='item'><div class='label'>TZ Debug</div><div class='value' id='tz_debug'>manual UTC</div></div>
-<div class='item'><div class='label'>Brightness</div><div class='value' id='bright'>-</div></div>
+<div class='item'><div class='label'>Brightness</div><div class='value' id='bright' title='Effective brightness (auto or manual)'>-</div></div>
 <div class='item'><div class='label'>IP</div><div class='value' style='font-size:12px' id='ip'>-</div></div>
 <div class='item'><div class='label'>Heap</div><div class='value' id='heap'>-</div></div>
 <div class='item'><div class='label'>Mode</div><div class='value' id='modeName'>-</div></div>
@@ -1565,7 +1565,8 @@ function updateStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
   document.getElementById('tz_debug').textContent=d.timezone_auto_detected?'Auto '+d.timezone_utc_offset_hours+'h':'Manual '+d.timezone_utc_offset_hours+'h';
   document.getElementById('ntp').textContent=d.ntp_synced?'\u2713 Synced':'\u23f1 Wait';
   document.getElementById('fw').textContent=d.fw_version_base||'-';document.getElementById('fw').title='Build: '+(d.fw_build_time||'unknown');
-  document.getElementById('bright').textContent=d.brightness+'%';
+  var effBr=d.effective_brightness!==undefined?d.effective_brightness:d.brightness;
+  document.getElementById('bright').textContent=effBr+'%'+(d.auto_bright_enabled?' (auto)':'');
   document.getElementById('ip').textContent=d.ip||'-';
   document.getElementById('heap').textContent=Math.round(d.heap/1024)+' KB';
   document.getElementById('modeName').textContent=MODE_NAMES[d.display_mode]||d.display_mode;
