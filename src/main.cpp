@@ -1277,7 +1277,7 @@ void updateWiFiConnect() {
           WiFi.RSSI(), (int)WiFi.channel(), ESP.getFreeHeap());
     if (!bootInfoSent) {
       bootInfoSent = true;
-      DLOGI("BOOT", "fw=%s  %s", FW_VERSION_BASE, cachedBootInfo.c_str());
+      DLOGI("BOOT", "fw=%s git:%s built:%s  %s", FW_VERSION_BASE, FW_GIT_HASH, FW_BUILD_TIME, cachedBootInfo.c_str());
     }
     if (lastTzCheck == 0) detectTimezone();  // skip on reconnects — already detected
   } else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
@@ -1414,11 +1414,11 @@ function updateStatus(){fetch('/api/status').then(r=>r.json()).then(d=>{
   const now=new Date();
   document.getElementById('time').textContent=now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   document.getElementById('date').textContent=now.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
-  document.getElementById('wifi').textContent=d.wifi_connected?'âœ" '+d.wifi_ssid:'âœ-- Offline';
+  document.getElementById('wifi').textContent=d.wifi_connected?'\u2713 '+d.wifi_ssid:'\u2717 Offline';
   document.getElementById('signal').textContent=d.wifi_rssi?d.wifi_rssi+' dBm':'--';
   document.getElementById('tz').textContent=d.timezone||'UTC';
   document.getElementById('tz_debug').textContent=d.timezone_auto_detected?'Auto '+d.timezone_utc_offset_hours+'h':'Manual '+d.timezone_utc_offset_hours+'h';
-  document.getElementById('ntp').textContent=d.ntp_synced?'âœ" Synced':'â± Wait';
+  document.getElementById('ntp').textContent=d.ntp_synced?'\u2713 Synced':'\u23f1 Wait';
   document.getElementById('fw').textContent=d.fw_version_base||'-';document.getElementById('fw').title='Build: '+(d.fw_build_time||'unknown');
   document.getElementById('bright').textContent=d.brightness+'%';
   document.getElementById('ip').textContent=d.ip||'-';
@@ -1622,14 +1622,14 @@ function fileSelected(input){const sb=document.getElementById('statusMsg');const
 if(input.files.length===0)return;fwFile=input.files[0];document.getElementById('fileName').textContent='ðŸ"„ '+fwFile.name;sb.textContent='Checking firmware...';sb.className='status-msg status-info';
 const r=new FileReader();r.onload=()=>{const b=new Uint8Array(r.result);const m=b.length>0?b[0]:0;
 fetch('/api/update/precheck?name='+encodeURIComponent(fwFile.name)+'&size='+fwFile.size+'&magic='+m).then(r=>r.json()).then(d=>{
-if(d.ok){ub.disabled=false;sb.textContent='âœ" '+d.summary;sb.className='status-msg status-ok';}else{ub.disabled=true;sb.textContent='âœ-- '+d.error;sb.className='status-msg status-err';}}).catch(e=>{ub.disabled=true;sb.textContent='Check failed: '+e;sb.className='status-msg status-err';});};
+if(d.ok){ub.disabled=false;sb.textContent='\u2713 '+d.summary;sb.className='status-msg status-ok';}else{ub.disabled=true;sb.textContent='\u2717 '+d.error;sb.className='status-msg status-err';}}).catch(e=>{ub.disabled=true;sb.textContent='Check failed: '+e;sb.className='status-msg status-err';});};
 r.onerror=()=>{ub.disabled=true;sb.textContent='Failed to read file';sb.className='status-msg status-err';};r.readAsArrayBuffer(fwFile.slice(0,1));}
 function uploadFirmware(){if(!fwFile||uploading)return;if(!confirm('Upload '+fwFile.name+'?'))return;uploading=true;document.getElementById('uploadBtn').disabled=true;
 const sb=document.getElementById('statusMsg');const pb=document.getElementById('progBar');const pf=document.getElementById('progFill');pb.style.display='block';sb.textContent='';
 const fd=new FormData();fd.append('firmware',fwFile);const x=new XMLHttpRequest();
 x.upload.addEventListener('progress',(e)=>{if(e.lengthComputable)pf.style.width=(e.loaded/e.total*100)+'%';});
-x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='âœ" Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='âœ-- '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='âœ-- Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
-x.addEventListener('error',()=>{uploading=false;sb.textContent='âœ-- Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
+x.addEventListener('load',()=>{uploading=false;try{const p=JSON.parse(x.responseText);if(x.status===200&&p.ok){sb.textContent='\u2713 Update OK ('+p.written+' bytes). Rebooting...';sb.className='status-msg status-ok';setTimeout(()=>location.reload(),2000);}else{const e=p?p.error:x.responseText;sb.textContent='\u2717 '+e;sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}}catch(e){sb.textContent='\u2717 Upload failed';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;}});
+x.addEventListener('error',()=>{uploading=false;sb.textContent='\u2717 Connection error';sb.className='status-msg status-err';document.getElementById('uploadBtn').disabled=false;});
 x.open('POST','/api/update?approve=1');x.send(fd);}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
@@ -1640,26 +1640,26 @@ _scanData=d.networks||[];list.innerHTML='';if(!_scanData.length){list.innerHTML=
 _scanData.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=(n.enc?'\uD83D\uDD12 ':'\uD83D\uDD13 ')+n.ssid+' ('+n.rssi+' dBm)';list.appendChild(o);});
 ss.textContent='found '+_scanData.length;sb.disabled=false;}).catch(e=>{list.innerHTML='<option>Scan failed</option>';ss.textContent='error';sb.disabled=false;});}
 function pollConnect(s){const msg=document.getElementById('wifiMsg');fetch('/api/wifi/connect').then(r=>r.json()).then(d=>{
-if(d.connected){msg.textContent='âœ" Connected to "'+s+'"! IP: '+d.ip;msg.className='status-msg status-ok';}
+if(d.connected){msg.textContent='\u2713 Connected to "'+s+'"! IP: '+d.ip;msg.className='status-msg status-ok';}
 else if(d.connecting){msg.textContent='Connecting to "'+s+'"...';setTimeout(()=>pollConnect(s),800);}
-else{msg.textContent='âœ-- '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
+else{msg.textContent='\u2717 '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
 function connectWifi(){const s=document.getElementById('wifiSsid').value.trim();const p=document.getElementById('wifiPass').value;const msg=document.getElementById('wifiMsg');
 if(!s){msg.textContent='Enter or select a network name';msg.className='status-msg status-err';return;}
 msg.textContent='Connecting to "'+s+'"'+(p?'':' (open)');msg.className='status-msg status-info';
 const sp=new URLSearchParams({ssid:s,pass:p});fetch('/api/wifi/connect?'+sp.toString()).then(r=>r.json()).then(d=>{
-if(d.connected){msg.textContent='âœ" Connected! IP: '+d.ip;msg.className='status-msg status-ok';}
+if(d.connected){msg.textContent='\u2713 Connected! IP: '+d.ip;msg.className='status-msg status-ok';}
 else if(d.connecting){setTimeout(()=>pollConnect(s),800);}
-else{msg.textContent='âœ-- '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
+else{msg.textContent='\u2717 '+(d.error||'Connection failed');msg.className='status-msg status-err';}}).catch(e=>{msg.textContent='Error: '+e;msg.className='status-msg status-err';});}
 function syncNTP(){const msg=document.getElementById('tzMsg');msg.textContent='Syncing...';msg.className='status-msg status-info';
-fetch('/api/ntp').then(r=>r.text()).then(t=>{msg.textContent='âœ" Syncing with NTP server...';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='âœ-- Error: '+e;msg.className='status-msg status-err';});}
+fetch('/api/ntp').then(r=>r.text()).then(t=>{msg.textContent='\u2713 Syncing with NTP server...';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='\u2717 Error: '+e;msg.className='status-msg status-err';});}
 function saveTimezone(){const m=document.querySelector('input[name="tzmode"]:checked').value;const o=m==='manual'?document.getElementById('tzOffset').value:'0';
 const b=document.getElementById('tzMsg');b.textContent='Saving...';b.className='status-msg status-info';
-fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='âœ" Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='âœ-- Error: '+e;b.className='status-msg status-err';});}
+fetch('/api/timezone?mode='+m+'&offset='+o).then(r=>r.text()).then(t=>{b.textContent='\u2713 Saved!';b.className='status-msg status-ok';}).catch(e=>{b.textContent='\u2717 Error: '+e;b.className='status-msg status-err';});}
 function saveBrightness(){const v=document.getElementById('brightness').value;fetch('/api/brightness?value='+Math.round(v/255*100)).catch(e=>console.warn(e));}
 function saveLedType(){const v=document.getElementById('rgbwToggle').checked?1:0;fetch('/api/ledtype?rgbw='+v).then(r=>r.json()).then(d=>{document.getElementById('rgbwSlider').style.background=d.rgbw?'#4CAF50':'#ccc';document.getElementById('ledTypeLabel').textContent=d.rgbw?'RGBW':'RGB';}).catch(e=>console.warn(e));}
 function saveLedDirection(){const v=document.getElementById('revToggle').checked?1:0;fetch('/api/leddirection?reversed='+v).then(r=>r.json()).then(d=>{document.getElementById('revSlider').style.background=d.reversed?'#4CAF50':'#ccc';document.getElementById('ledDirLabel').textContent=d.reversed?'Reversed':'Normal';}).catch(e=>console.warn(e));}
-function saveDebugConfig(){const ip=document.getElementById('dbgIp').value.trim();const port=document.getElementById('dbgPort').value||'7878';const en=document.getElementById('dbgToggle').checked?1:0;const msg=document.getElementById('dbgMsg');msg.textContent='Saving...';msg.className='status-msg status-info';fetch('/api/debug?enabled='+en+'&ip='+encodeURIComponent(ip)+'&port='+port).then(r=>r.json()).then(d=>{document.getElementById('dbgSlider').style.background=d.enabled?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=d.enabled?'Enabled':'Disabled';msg.textContent='✓ Saved';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
-function sendDebugTest(){const msg=document.getElementById('dbgMsg');msg.textContent='Sending...';msg.className='status-msg status-info';fetch('/api/debug?test=1').then(r=>r.json()).then(d=>{msg.textContent='✓ Test packet sent';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='✗ '+e;msg.className='status-msg status-err';});}
+function saveDebugConfig(){const ip=document.getElementById('dbgIp').value.trim();const port=document.getElementById('dbgPort').value||'7878';const en=document.getElementById('dbgToggle').checked?1:0;const msg=document.getElementById('dbgMsg');msg.textContent='Saving...';msg.className='status-msg status-info';fetch('/api/debug?enabled='+en+'&ip='+encodeURIComponent(ip)+'&port='+port).then(r=>r.json()).then(d=>{document.getElementById('dbgSlider').style.background=d.enabled?'#4CAF50':'#ccc';document.getElementById('dbgEnabledLabel').textContent=d.enabled?'Enabled':'Disabled';msg.textContent='\u2713 Saved';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
+function sendDebugTest(){const msg=document.getElementById('dbgMsg');msg.textContent='Sending...';msg.className='status-msg status-info';fetch('/api/debug?test=1').then(r=>r.json()).then(d=>{msg.textContent='\u2713 Test packet sent';msg.className='status-msg status-ok';}).catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
 function rgbToHex(r,g,b){return'#'+[r,g,b].map(v=>{const h=Number(v).toString(16);return h.length===1?'0'+h:h;}).join('');}
 function hexToRgb(hex){const v=(hex||'#000000').replace('#','');if(v.length!==6)return{r:0,g:0,b:0};return{r:parseInt(v.substring(0,2),16),g:parseInt(v.substring(2,4),16),b:parseInt(v.substring(4,6),16)};}
 function updateWidthLabels(){document.getElementById('hourWidthLabel').textContent=document.getElementById('hourWidth').value;
@@ -1694,14 +1694,14 @@ function saveModeConfig(silent=false,persist=true){
 const msg=document.getElementById('modeCfgMsg');
 if(!silent){msg.textContent=persist?'Saving mode visuals...':'Applying mode visuals...';msg.className='status-msg status-info';}
 const q=buildModeCfgQuery(persist);
-fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){if(!silent){msg.textContent='âœ" Mode visuals saved';msg.className='status-msg status-ok';}applyModeCfgToControls(d);}else{msg.textContent='âœ-- '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
-.catch(e=>{msg.textContent='âœ-- '+e;msg.className='status-msg status-err';});}
+fetch(q).then(r=>r.json()).then(d=>{if(d&&d.ok){if(!silent){msg.textContent='\u2713 Mode visuals saved';msg.className='status-msg status-ok';}applyModeCfgToControls(d);}else{msg.textContent='\u2717 '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}})
+.catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
 function resetModeConfig(){const m=document.getElementById('displayMode').value;
 const msg=document.getElementById('modeCfgMsg');
 msg.textContent='Resetting mode visuals...';msg.className='status-msg status-info';
 fetch('/api/mode/config?reset=1&persist=1&mode='+m).then(r=>r.json()).then(d=>{
-if(d&&d.ok){msg.textContent='âœ" Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='âœ-- '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
-}).catch(e=>{msg.textContent='âœ-- '+e;msg.className='status-msg status-err';});}
+if(d&&d.ok){msg.textContent='\u2713 Mode visuals reset to defaults';msg.className='status-msg status-ok';applyModeCfgToControls(d);}else{msg.textContent='\u2717 '+((d&&d.error)||'Failed');msg.className='status-msg status-err';}
+}).catch(e=>{msg.textContent='\u2717 '+e;msg.className='status-msg status-err';});}
 function saveDisplayMode(){const m=document.getElementById('displayMode').value;fetch('/api/display?mode='+m).catch(e=>console.warn(e));updateModeDescription();loadModeConfig();}
 function updateModeDescription(){const m=parseInt(document.getElementById('displayMode').value);
 const desc={0:'Rainbow orbit background with clear red hour, green minute, and blue second markers (5-3-7 LED spread).',
@@ -2451,7 +2451,7 @@ void loop() {
         static bool bootMsgConfirmed = false;
         if (!bootMsgConfirmed) {
           bootMsgConfirmed = true;
-          DLOGI("BOOT", "fw=%s  %s", FW_VERSION_BASE, cachedBootInfo.c_str());
+          DLOGI("BOOT", "fw=%s git:%s built:%s  %s", FW_VERSION_BASE, FW_GIT_HASH, FW_BUILD_TIME, cachedBootInfo.c_str());
         }
         DLOGI("HB", "heap=%u frag=%u uptime=%lus mode=%d ntp=%d rssi=%d",
               ESP.getFreeHeap(), ESP.getHeapFragmentation(),
