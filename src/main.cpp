@@ -17,7 +17,6 @@
 #include <Updater.h>
 #include <time.h>
 #include <sys/time.h>
-#include <WiFiUDP.h>
 
 #ifndef NUM_LEDS
 #define NUM_LEDS 60
