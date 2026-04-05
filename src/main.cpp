@@ -15,6 +15,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 #include <Updater.h>
+#include <ESP8266httpUpdate.h>
 #include <time.h>
 #include <sys/time.h>
 
@@ -153,6 +154,10 @@ struct {
   unsigned long lastAttemptMs = 0;
   unsigned long lastSuccessMs = 0;
 } tzDiag;
+
+// Direct self-update (device fetches firmware URL itself)
+String pendingDirectUpdateUrl  = "";
+String lastDirectUpdateError   = "";
 
 // OTA state
 struct {
@@ -1774,7 +1779,11 @@ min-height:100vh;padding:20px;color:#333}.container{max-width:700px;margin:0 aut
 <div id='updateInfo' style='display:none;margin-bottom:10px;padding:8px 10px;background:#f0f8ff;border:1px solid #b3d9ff;border-radius:6px;font-size:12px'>
 <div>Latest: <strong id='latestTag'>-</strong> <a id='releaseLink' href='#' target='_blank' style='color:#2779bd;font-size:11px'>(view release)</a></div>
 <div style='margin-top:4px'>Diff from <span id='currentHashSpan' style='font-family:monospace'></span>: <a id='diffLink' href='#' target='_blank' style='color:#2779bd'>compare on GitHub</a></div>
-<div style='margin-top:6px'><a id='downloadLink' href='#' target='_blank' style='color:#2779bd;font-weight:bold'>Download firmware.bin</a></div>
+<div style='margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center'>
+<a id='downloadLink' href='#' target='_blank' class='btn btn-secondary' style='font-size:12px;padding:6px 14px;text-decoration:none'>Download firmware.bin</a>
+<button id='directFlashBtn' onclick='directFlash()' style='display:none;padding:6px 14px;background:#d35400;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold'>Flash directly to device</button>
+</div>
+<div id='directFlashStatus' style='display:none;margin-top:6px;font-size:11px'></div>
 </div>
 <div class='upload-area' onclick='document.getElementById("fwFile").click()' id='uploadArea'>
 <p id='fileName'>Click to select .bin firmware file</p>
@@ -1803,7 +1812,7 @@ Offset: <span id='tzOffset'>0</span>h (<span id='tzOffsetSec'>0</span>s) | Auto-
 </div>
 
 <script>
-let fwFile=null,uploading=false;function updateBrightnessLabel(){const v=document.getElementById('brightness').value;
+let fwFile=null,uploading=false,_directUrl='';function updateBrightnessLabel(){const v=document.getElementById('brightness').value;
 document.getElementById('brightValue').textContent=v;document.getElementById('brightLabel').textContent=(Math.round(v/255*100))+'%';}
 let modeCfgSaveTimer=null,modeCfgPersistTimer=null;
 function toggleTzMode(){document.getElementById('manualTz').style.display=document.querySelector('input[name="tzmode"]:checked').value==='manual'?'block':'none';}
@@ -1832,7 +1841,8 @@ document.getElementById('latestTag').textContent=tag+' ('+currentVer+' on device
 document.getElementById('releaseLink').href=releaseUrl;
 if(currentHash){document.getElementById('diffLink').href='https://github.com/noless-zz/esp8266-led-strip-clock/compare/'+currentHash+'...'+tag;}
 const asset=(rel.assets||[]).find(a=>a.name==='firmware.bin');
-if(asset){document.getElementById('downloadLink').href=asset.browser_download_url;}else{document.getElementById('downloadLink').style.display='none';}
+if(asset){document.getElementById('downloadLink').href=asset.browser_download_url;_directUrl=asset.browser_download_url;document.getElementById('directFlashBtn').style.display='inline-block';}
+else{document.getElementById('downloadLink').style.display='none';document.getElementById('directFlashBtn').style.display='none';}
 info.style.display='block';
 const upToDate=tag==='v'+currentVer.split('+')[0];
 if(upToDate){st.textContent='\u2713 Up to date ('+tag+')';st.style.color='#3a3';}
@@ -1840,6 +1850,32 @@ else{st.textContent='\u25b2 Update available: '+tag;st.style.color='#c80';}
 btn.disabled=false;
 }).catch(e=>{st.textContent='GitHub error: '+e;st.style.color='#c33';btn.disabled=false;});
 }).catch(e=>{st.textContent='Device error: '+e;st.style.color='#c33';btn.disabled=false;});}
+function directFlash(){
+if(!_directUrl){alert('No firmware URL — run Check for Update first.');return;}
+if(!confirm('Flash firmware directly to device?\nThe device will download and install it, then reboot.'))return;
+const btn=document.getElementById('directFlashBtn');
+const st=document.getElementById('directFlashStatus');
+btn.disabled=true;st.style.display='block';st.style.color='#888';st.textContent='Sending URL to device...';
+fetch('/api/update/direct?url='+encodeURIComponent(_directUrl))
+.then(r=>r.json()).then(d=>{
+if(!d.ok){st.textContent='\u2717 '+d.error;st.style.color='#c33';btn.disabled=false;return;}
+st.textContent='Downloading firmware \u2026 device will reboot automatically.';
+let polls=0,gone=false;
+const iv=setInterval(()=>{
+polls++;
+fetch('/api/status',{signal:AbortSignal.timeout?AbortSignal.timeout(2500):undefined}).then(r=>r.json()).then(s=>{
+if(s.direct_update_error){clearInterval(iv);st.textContent='\u2717 Update failed: '+s.direct_update_error;st.style.color='#c33';btn.disabled=false;}
+else if(polls>50){clearInterval(iv);st.textContent='Timeout \u2014 check device manually.';st.style.color='#c33';btn.disabled=false;}
+}).catch(()=>{
+if(!gone){gone=true;st.textContent='Device rebooting\u2026';clearInterval(iv);
+setTimeout(()=>{st.textContent='Waiting for device to come back\u2026';
+let wait=0;const iv2=setInterval(()=>{wait++;
+fetch('/api/status').then(r=>r.json()).then(()=>{clearInterval(iv2);st.textContent='\u2713 Update complete!';st.style.color='#3a3';setTimeout(()=>location.reload(),1500);})
+.catch(()=>{if(wait>30){clearInterval(iv2);st.textContent='Device not responding \u2014 check manually.';st.style.color='#c33';btn.disabled=false;}});
+},2000);},3000);}
+});
+},2000);
+}).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
@@ -2108,6 +2144,8 @@ void setupWebServer() {
     doc["debug_ip"] = debugServerIp;
     doc["debug_port"] = debugServerPort;
     doc["simple_fade_ms"] = simpleFadeMs;
+    doc["direct_update_pending"] = (pendingDirectUpdateUrl.length() > 0);
+    if (lastDirectUpdateError.length() > 0) doc["direct_update_error"] = lastDirectUpdateError;
     String json;
     serializeJson(doc, json);
     req->send(200, "application/json", json);
@@ -2526,6 +2564,26 @@ void setupWebServer() {
     }
   );
   
+  // API: Direct self-update — device fetches firmware binary from a URL and flashes itself
+  server.on("/api/update/direct", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!wifiConnected) {
+      req->send(200, "application/json", "{\"ok\":false,\"error\":\"No WiFi connection\"}");
+      return;
+    }
+    if (!req->hasParam("url")) {
+      req->send(200, "application/json", "{\"ok\":false,\"error\":\"url param required\"}");
+      return;
+    }
+    String url = req->getParam("url")->value();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      req->send(200, "application/json", "{\"ok\":false,\"error\":\"invalid url\"}");
+      return;
+    }
+    pendingDirectUpdateUrl = url;
+    lastDirectUpdateError  = "";
+    req->send(200, "application/json", "{\"ok\":true,\"msg\":\"Download started\"}");
+  });
+
   // Catchall
   server.onNotFound([](AsyncWebServerRequest *req) {
     req->redirect("http://" + WiFi.softAPIP().toString() + "/");
@@ -2723,6 +2781,26 @@ void loop() {
 
   checkWiFi();
   updateWiFiConnect();
+
+  // Self-update: device fetches firmware from URL and flashes itself
+  if (pendingDirectUpdateUrl.length() > 0 && wifiConnected) {
+    String url = pendingDirectUpdateUrl;
+    pendingDirectUpdateUrl = "";
+    DLOGI("OTA", "Direct self-update start  url=%s", url.c_str());
+    Serial.println("[OTA] Direct update from: " + url);
+    BearSSL::WiFiClientSecure client;
+    client.setInsecure();  // skip cert check — URL came from our own UI / GitHub release
+    ESPhttpUpdate.setLedPin(LED_BUILTIN, LOW);
+    ESPhttpUpdate.rebootOnUpdate(true);
+    t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
+    if (ret != HTTP_UPDATE_OK) {
+      lastDirectUpdateError = ESPhttpUpdate.getLastErrorString();
+      DLOGE("OTA", "Direct update FAILED: %s", lastDirectUpdateError.c_str());
+      Serial.println("[OTA] Direct update failed: " + lastDirectUpdateError);
+    }
+    // HTTP_UPDATE_OK never reaches here — board reboots automatically
+  }
+
   ArduinoOTA.handle();
   
   // Trigger NTP sync after WiFi connects
