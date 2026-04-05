@@ -15,7 +15,6 @@
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 #include <Updater.h>
-#include <ESP8266httpUpdate.h>
 #include <time.h>
 #include <sys/time.h>
 
@@ -154,10 +153,6 @@ struct {
   unsigned long lastAttemptMs = 0;
   unsigned long lastSuccessMs = 0;
 } tzDiag;
-
-// Direct self-update (device fetches firmware URL itself)
-String pendingDirectUpdateUrl  = "";
-String lastDirectUpdateError   = "";
 
 // OTA state
 struct {
@@ -1852,30 +1847,64 @@ btn.disabled=false;
 }).catch(e=>{st.textContent='GitHub error: '+e;st.style.color='#c33';btn.disabled=false;});
 }).catch(e=>{st.textContent='Device error: '+e;st.style.color='#c33';btn.disabled=false;});}
 function directFlash(){
-if(!_directUrl){alert('No firmware URL — run Check for Update first.');return;}
-if(!confirm('Flash firmware directly to device?\nThe device will download and install it, then reboot.'))return;
+if(!_directUrl){alert('No firmware URL \u2014 run Check for Update first.');return;}
+if(!confirm('Flash firmware directly to device?\nYour browser will download the binary then upload it over the local network.'))return;
 const btn=document.getElementById('directFlashBtn');
 const st=document.getElementById('directFlashStatus');
-btn.disabled=true;st.style.display='block';st.style.color='#888';st.textContent='Sending URL to device...';
-fetch('/api/update/direct?url='+encodeURIComponent(_directUrl))
+btn.disabled=true;st.style.display='block';st.style.color='#888';
+// Snapshot current version so we can verify it changed after reboot
+let _oldVer='';
+fetch('/api/status').then(r=>r.json()).then(s=>{_oldVer=s.fw_version_base||'';}).catch(()=>{});
+// Step 1: browser fetches the binary (full TLS on the browser side, no TLS on device)
+st.textContent='Downloading firmware from GitHub\u2026';
+fetch(_directUrl).then(r=>{
+if(!r.ok)throw new Error('GitHub download failed: '+r.status);
+return r.blob();
+}).then(blob=>{
+// Step 2: pre-check
+st.textContent='Checking firmware ('+Math.round(blob.size/1024)+' KB)\u2026';
+const magic=new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(new Uint8Array(fr.result)[0]);fr.readAsArrayBuffer(blob.slice(0,1));});
+magic.then(m=>{
+return fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+m)
 .then(r=>r.json()).then(d=>{
-if(!d.ok){st.textContent='\u2717 '+d.error;st.style.color='#c33';btn.disabled=false;return;}
-st.textContent='Downloading firmware \u2026 device will reboot automatically.';
-let polls=0,gone=false;
+if(!d.ok)throw new Error(d.error||'Precheck failed');
+// Step 3: upload binary to device over plain HTTP
+st.textContent='Uploading to device\u2026';
+const fd=new FormData();fd.append('firmware',blob,'firmware.bin');
+const x=new XMLHttpRequest();
+x.upload.addEventListener('progress',e=>{if(e.lengthComputable)st.textContent='Uploading: '+Math.round(e.loaded/e.total*100)+'%';});
+x.onload=()=>{
+const resp=x.responseText||'';
+let uploadOk=false;
+try{const j=JSON.parse(resp);uploadOk=(j.ok===true);}catch(e){uploadOk=(x.status>=200&&x.status<300);}
+if(!uploadOk){st.textContent='\u2717 Upload rejected by device: '+(resp||'HTTP '+x.status);st.style.color='#c33';btn.disabled=false;return;}
+// Step 4: wait for device to go offline then come back, verify version changed
+st.textContent='Waiting for device to reboot\u2026';
+let phase='wait_offline',wait=0;
 const iv=setInterval(()=>{
-polls++;
-fetch('/api/status',{signal:AbortSignal.timeout?AbortSignal.timeout(2500):undefined}).then(r=>r.json()).then(s=>{
-if(s.direct_update_error){clearInterval(iv);st.textContent='\u2717 Update failed: '+s.direct_update_error;st.style.color='#c33';btn.disabled=false;}
-else if(polls>50){clearInterval(iv);st.textContent='Timeout \u2014 check device manually.';st.style.color='#c33';btn.disabled=false;}
+wait++;
+if(wait>60){clearInterval(iv);st.textContent='\u2717 Timeout \u2014 device did not come back';st.style.color='#c33';btn.disabled=false;return;}
+fetch('/api/status').then(r=>r.json()).then(s=>{
+if(phase==='wait_offline'){/* still up, keep waiting */}
+else if(phase==='wait_online'){
+clearInterval(iv);
+const newVer=s.fw_version_base||'?';
+if(_oldVer&&newVer===_oldVer){
+st.textContent='\u2717 Device rebooted but firmware unchanged ('+newVer+') \u2014 bootloader may have rejected the image';
+st.style.color='#c33';btn.disabled=false;
+}else{
+st.textContent='\u2713 Updated '+(_oldVer?_oldVer+' \u2192 ':'')+newVer;
+st.style.color='#3a3';setTimeout(()=>location.reload(),2000);
+}
+}
 }).catch(()=>{
-if(!gone){gone=true;st.textContent='Device rebooting\u2026';clearInterval(iv);
-setTimeout(()=>{st.textContent='Waiting for device to come back\u2026';
-let wait=0;const iv2=setInterval(()=>{wait++;
-fetch('/api/status').then(r=>r.json()).then(()=>{clearInterval(iv2);st.textContent='\u2713 Update complete!';st.style.color='#3a3';setTimeout(()=>location.reload(),1500);})
-.catch(()=>{if(wait>30){clearInterval(iv2);st.textContent='Device not responding \u2014 check manually.';st.style.color='#c33';btn.disabled=false;}});
-},2000);},3000);}
+if(phase==='wait_offline'){phase='wait_online';st.textContent='Device offline, waiting for reboot\u2026';}
 });
-},2000);
+},1500);
+};
+x.onerror=()=>{st.textContent='\u2717 Upload error';st.style.color='#c33';btn.disabled=false;};
+x.open('POST','/api/update?approve=1');x.send(fd);
+});});
 }).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
@@ -2145,8 +2174,6 @@ void setupWebServer() {
     doc["debug_ip"] = debugServerIp;
     doc["debug_port"] = debugServerPort;
     doc["simple_fade_ms"] = simpleFadeMs;
-    doc["direct_update_pending"] = (pendingDirectUpdateUrl.length() > 0);
-    if (lastDirectUpdateError.length() > 0) doc["direct_update_error"] = lastDirectUpdateError;
     String json;
     serializeJson(doc, json);
     req->send(200, "application/json", json);
@@ -2527,8 +2554,17 @@ void setupWebServer() {
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest *req) {
       bool success = !Update.hasError() && Update.isFinished();
-      req->send(success ? 200 : 500, "application/json", 
-        String("{\"ok\":") + (success ? "true" : "false") + ",\"written\":" + String(Update.progress()) + "}");
+      uint32_t written = (unsigned)Update.progress();
+      if (success) {
+        DLOGI("OTA", "Web upload RESPONSE ok  written=%u  heap=%u", written, ESP.getFreeHeap());
+      } else {
+        DLOGE("OTA", "Web upload RESPONSE fail  written=%u  err=%u  errStr=%s  heap=%u",
+              written, (unsigned)Update.getError(), Update.getErrorString(), ESP.getFreeHeap());
+      }
+      req->send(success ? 200 : 500, "application/json",
+        String("{\"ok\":") + (success ? "true" : "false") +
+        ",\"written\":" + written +
+        ",\"error\":\"" + (success ? "" : String(Update.getErrorString())) + "\"}");
       if (success) {
         delay(500);
         ESP.restart();
@@ -2541,57 +2577,54 @@ void setupWebServer() {
         // from loop() to drain it; without that, all writes flush at once in one huge
         // blocking burst and the lwIP stack crashes (Soft WDT, exccause=4, 0x4024xxxx).
         uint32_t maxSize = getMaxUpdateSize();
+        DLOGI("OTA", "Web upload start  file=%s  maxSize=%u  heap=%u  frag=%u",
+              filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
         if (!Update.begin(maxSize, U_FLASH)) {
-          Serial.println("[OTA] Update begin failed");
-          DLOGE("OTA", "Web upload begin FAILED  heap=%u", ESP.getFreeHeap());
+          DLOGE("OTA", "Web upload begin FAILED  errCode=%u  errStr=%s  heap=%u",
+                (unsigned)Update.getError(), Update.getErrorString(), ESP.getFreeHeap());
+          Serial.println("[OTA] Update begin failed: " + String(Update.getErrorString()));
           return;
         }
-        Serial.print("[OTA] Updating: ");
-        Serial.println(filename);
-        DLOGI("OTA", "Web upload start  file=%s  heap=%u", filename.c_str(), ESP.getFreeHeap());
+        Serial.println("[OTA] Updating: " + filename);
         otaStatus.inProgress = true;
       }
 
       ESP.wdtFeed();   // keep WDT happy during flash write (each chunk ~1436 B)
-      if (Update.write(data, len) != len) {
+      size_t written = Update.write(data, len);
+      if (written != len) {
+        DLOGE("OTA", "Web upload write FAILED  offset=%u  want=%u  got=%u  errStr=%s",
+              (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString());
         Update.printError(Serial);
       }
       yield();         // let lwIP process ACKs before the next chunk arrives
 
+      // Log progress every ~64 KB
+      static uint32_t _lastLoggedKB = 0;
+      uint32_t nowKB = (index + len) / 65536;
+      if (nowKB != _lastLoggedKB) {
+        _lastLoggedKB = nowKB;
+        DLOGI("OTA", "Web upload progress  offset=%u KB  heap=%u  frag=%u",
+              (index + len) / 1024, ESP.getFreeHeap(), ESP.getHeapFragmentation());
+      }
+
       if (final) {
+        _lastLoggedKB = 0;
         otaStatus.inProgress = false;
         if (Update.end(true)) {
+          DLOGI("OTA", "Web upload end OK  totalWritten=%u  heap=%u",
+                (unsigned)Update.progress(), ESP.getFreeHeap());
           Serial.println("\n[OTA] Update Success!");
-          DLOGI("OTA", "Web upload SUCCESS  written=%u", (unsigned)Update.progress());
         } else {
-          Serial.println("\n[OTA] Update Failed!");
+          DLOGE("OTA", "Web upload end FAILED  errCode=%u  errStr=%s  written=%u  heap=%u",
+                (unsigned)Update.getError(), Update.getErrorString(),
+                (unsigned)Update.progress(), ESP.getFreeHeap());
+          Serial.println("\n[OTA] Update Failed: " + String(Update.getErrorString()));
           Update.printError(Serial);
-          DLOGE("OTA", "Web upload FAILED  err=%u", (unsigned)Update.getError());
         }
       }
     }
   );
   
-  // API: Direct self-update — device fetches firmware binary from a URL and flashes itself
-  server.on("/api/update/direct", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!wifiConnected) {
-      req->send(200, "application/json", "{\"ok\":false,\"error\":\"No WiFi connection\"}");
-      return;
-    }
-    if (!req->hasParam("url")) {
-      req->send(200, "application/json", "{\"ok\":false,\"error\":\"url param required\"}");
-      return;
-    }
-    String url = req->getParam("url")->value();
-    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-      req->send(200, "application/json", "{\"ok\":false,\"error\":\"invalid url\"}");
-      return;
-    }
-    pendingDirectUpdateUrl = url;
-    lastDirectUpdateError  = "";
-    req->send(200, "application/json", "{\"ok\":true,\"msg\":\"Download started\"}");
-  });
-
   // Catchall
   server.onNotFound([](AsyncWebServerRequest *req) {
     req->redirect("http://" + WiFi.softAPIP().toString() + "/");
@@ -2790,35 +2823,12 @@ void loop() {
   checkWiFi();
   updateWiFiConnect();
 
-  // Self-update: device fetches firmware from URL and flashes itself
-  if (pendingDirectUpdateUrl.length() > 0 && wifiConnected) {
-    String url = pendingDirectUpdateUrl;
-    pendingDirectUpdateUrl = "";
-    DLOGI("OTA", "Direct self-update start  url=%s", url.c_str());
-    Serial.println("[OTA] Direct update from: " + url);
-    BearSSL::WiFiClientSecure client;
-    client.setInsecure();  // skip cert check — URL came from our own UI / GitHub release
-    ESPhttpUpdate.setLedPin(LED_BUILTIN, LOW);
-    ESPhttpUpdate.rebootOnUpdate(true);
-    // GitHub release URLs 301-redirect to the CDN (objects.githubusercontent.com).
-    // Without FORCE_FOLLOW_REDIRECTS the library downloads the tiny HTML redirect page,
-    // "flashes" it, reboots, and the bootloader correctly rejects it.
-    ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-    t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
-    if (ret != HTTP_UPDATE_OK) {
-      lastDirectUpdateError = ESPhttpUpdate.getLastErrorString();
-      DLOGE("OTA", "Direct update FAILED: %s", lastDirectUpdateError.c_str());
-      Serial.println("[OTA] Direct update failed: " + lastDirectUpdateError);
-    }
-    // HTTP_UPDATE_OK never reaches here — board reboots automatically
-  }
-
   ArduinoOTA.handle();
-  
+
   // Trigger NTP sync after WiFi connects (skip during OTA — competing TCP traffic)
   bool ntpSynced = (time(nullptr) > 86400);
   unsigned long ntpInterval = ntpSynced ? 3600000UL : 20000UL;
-  bool otaActive = otaStatus.inProgress || (pendingDirectUpdateUrl.length() > 0);
+  bool otaActive = otaStatus.inProgress;
   if (!otaActive && wifiConnected && millis() - lastNtpSync > ntpInterval) {
     syncTimeNTP();
   }
