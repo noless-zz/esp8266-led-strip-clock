@@ -24,6 +24,12 @@
 #ifndef LED_PIN
 #define LED_PIN D4
 #endif
+#ifndef BTN1_PIN
+#define BTN1_PIN D5   // Button 1: short=cycle mode (on) / turn on (off); long=turn off LEDs
+#endif
+#ifndef BTN2_PIN
+#define BTN2_PIN D6   // Button 2: short=cycle W-channel brightness through 4 levels
+#endif
 
 // Version is injected by scripts/auto_version.py pre-build script.
 // MAJOR.MINOR.PATCH+BUILD  where minor=git commit count, build=compile counter.
@@ -79,6 +85,10 @@ const int EEPROM_DBG_PORT_ADDR    = 297;   // 2 bytes: port (big-endian)
 const int EEPROM_FADE_MS_ADDR     = 299;   // 2 bytes: Simple mode fade duration (big-endian, 0=off)
 const int EEPROM_AUTO_BRIGHT_ADDR = 301;   // 6 bytes: magic(1), enabled(1), dim_val(1), peak_val(1), dim_hour(1), peak_hour(1)
 const uint8_t EEPROM_AUTO_BRIGHT_MAGIC = 0xAB;
+const int EEPROM_BTN_MAGIC_ADDR  = 307;   // 1 byte: magic 0xBC (button / W-channel settings)
+const int EEPROM_W_BRIGHT_ADDR   = 308;   // 1 byte: W channel brightness level index (0-3)
+const int EEPROM_LEDS_OFF_ADDR   = 309;   // 1 byte: LEDs off state (1=off, 0=on)
+const uint8_t EEPROM_BTN_MAGIC   = 0xBC;
 const uint8_t EEPROM_DBG_MAGIC    = 0xD8;
 const uint8_t EEPROM_MODE_CFG_MAGIC = 0x5C;
 const uint8_t EEPROM_MAGIC = 0xA7;
@@ -94,8 +104,12 @@ uint8_t autoBrightPeakVal  = 255;  // 100%        (day maximum)
 uint8_t autoBrightDimHour  = 2;    // 2 am
 uint8_t autoBrightPeakHour = 14;   // 2 pm
 bool ledRgbw = false;        // false=RGB, true=RGBW
-bool ledReversed = false;    // false=normal (0â†'59), true=reversed (59â†'0)
+bool ledReversed = false;    // false=normal (0→59), true=reversed (59→0)
 DisplayMode displayMode = DISPLAY_SOLID;
+bool ledsOff = false;        // true = LEDs blanked via button; persisted to EEPROM
+uint8_t wBrightLevel = 0;    // W channel brightness level index (0-3)
+static const uint8_t W_BRIGHT_LEVELS[4] = {0, 85, 170, 255}; // 0%, ~33%, ~67%, 100%
+static const uint8_t W_BRIGHT_LEVEL_COUNT = sizeof(W_BRIGHT_LEVELS) / sizeof(W_BRIGHT_LEVELS[0]);
 struct CRGB { uint8_t r, g, b; } leds[NUM_LEDS];
 
 struct ModeDisplayConfig {
@@ -199,6 +213,18 @@ void setDefaultModeConfigs();
 void loadModeConfigsFromEEPROM();
 void saveModeConfigToEEPROM(uint8_t mode);
 void saveDisplayModeToEEPROM();
+void saveButtonSettings();
+
+// Button state tracking
+struct ButtonState {
+  bool wasPressed;
+  unsigned long pressedAt;
+  bool actionFired;
+};
+ButtonState btn1State = {false, 0, false};
+ButtonState btn2State = {false, 0, false};
+const unsigned long BTN_LONG_PRESS_MS  = 800;  // hold >= 800ms = long press
+const unsigned long BTN_DEBOUNCE_MS    = 50;   // ignore releases < 50ms
 
 // ============================================================================
 // Remote Debug Logging
@@ -286,7 +312,7 @@ void showLEDs() {
   for (int i = 0; i < NUM_LEDS; i++) {
     int phys = ledReversed ? (NUM_LEDS - 1 - i) : i;
     if (ledRgbw)
-      ledStrip->setPixelColor(phys, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b, 0));
+      ledStrip->setPixelColor(phys, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b, W_BRIGHT_LEVELS[wBrightLevel]));
     else
       ledStrip->setPixelColor(phys, ledStrip->Color(leds[i].r, leds[i].g, leds[i].b));
   }
@@ -801,10 +827,16 @@ void displayClock() {
   time_t now = time(nullptr);
   bool ntpSynced = (now >= 86400);
 
-  // forceStatusDisplay beats everything --" always show animation
+  // forceStatusDisplay beats everything -- always show animation
   // otherwise: show animation until NTP synced, unless forceClockDisplay
   if (forceStatusDisplay || (!ntpSynced && !forceClockDisplay)) {
     displayBootAnimation();
+    return;
+  }
+
+  // LEDs turned off via button 1 long press -- blank the strip
+  if (ledsOff) {
+    if (ledStrip) { ledStrip->clear(); ledStrip->show(); }
     return;
   }
 
@@ -1012,6 +1044,13 @@ void loadEEPROMSettings() {
       autoBrightPeakHour = ph;
     }
   }
+
+  // Load button / W-channel settings
+  if (EEPROM.read(EEPROM_BTN_MAGIC_ADDR) == EEPROM_BTN_MAGIC) {
+    uint8_t wbl = EEPROM.read(EEPROM_W_BRIGHT_ADDR);
+    if (wbl < W_BRIGHT_LEVEL_COUNT) wBrightLevel = wbl;
+    ledsOff = (EEPROM.read(EEPROM_LEDS_OFF_ADDR) == 1);
+  }
 }
 
 void saveFadeMs() {
@@ -1029,6 +1068,14 @@ void saveAutoBrightSettings() {
   EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 3, autoBrightPeakVal);
   EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 4, autoBrightDimHour);
   EEPROM.write(EEPROM_AUTO_BRIGHT_ADDR + 5, autoBrightPeakHour);
+  EEPROM.commit();
+}
+
+void saveButtonSettings() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.write(EEPROM_BTN_MAGIC_ADDR, EEPROM_BTN_MAGIC);
+  EEPROM.write(EEPROM_W_BRIGHT_ADDR,  wBrightLevel);
+  EEPROM.write(EEPROM_LEDS_OFF_ADDR,  ledsOff ? 1 : 0);
   EEPROM.commit();
 }
 
@@ -1066,6 +1113,75 @@ void saveEEPROMSettings(const String& ssid, const String& pass) {
   EEPROM.commit();
   Serial.println("[EEPROM] Saved settings for " + ssid);
   DLOGI("EEPROM", "Settings saved  ssid=%s  heap=%u", ssid.c_str(), ESP.getFreeHeap());
+}
+
+// ============================================================================
+// Button Handling
+// ============================================================================
+
+void setupButtons() {
+  pinMode(BTN1_PIN, INPUT_PULLUP);
+  pinMode(BTN2_PIN, INPUT_PULLUP);
+  Serial.printf("[BTN] Button 1 on pin %d, Button 2 on pin %d\n", BTN1_PIN, BTN2_PIN);
+}
+
+// Poll both buttons and fire short/long-press actions.
+// Call this every loop iteration (it uses millis(), not delay()).
+void handleButtons() {
+  unsigned long now = millis();
+
+  // --- Button 1: power / mode ---
+  {
+    bool nowPressed = (digitalRead(BTN1_PIN) == LOW);
+    if (nowPressed && !btn1State.wasPressed) {
+      // Falling edge: button just pressed
+      btn1State.pressedAt  = now;
+      btn1State.actionFired = false;
+    } else if (nowPressed && btn1State.wasPressed && !btn1State.actionFired) {
+      // Held: fire long-press as soon as threshold is crossed
+      if (now - btn1State.pressedAt >= BTN_LONG_PRESS_MS) {
+        btn1State.actionFired = true;
+        if (!ledsOff) {
+          ledsOff = true;
+          if (ledStrip) { ledStrip->clear(); ledStrip->show(); }
+          saveButtonSettings();
+          DLOGI("BTN", "Button 1 long press: LEDs OFF");
+        }
+      }
+    } else if (!nowPressed && btn1State.wasPressed) {
+      // Rising edge: button released
+      if (!btn1State.actionFired && (now - btn1State.pressedAt >= BTN_DEBOUNCE_MS)) {
+        // Short press
+        if (ledsOff) {
+          ledsOff = false;
+          saveButtonSettings();
+          DLOGI("BTN", "Button 1 short press: LEDs ON");
+        } else {
+          displayMode = (DisplayMode)((displayMode + 1) % DISPLAY_MAX);
+          saveDisplayModeToEEPROM();
+          DLOGI("BTN", "Button 1 short press: mode -> %d", (int)displayMode);
+        }
+      }
+    }
+    btn1State.wasPressed = nowPressed;
+  }
+
+  // --- Button 2: W-channel brightness ---
+  {
+    bool nowPressed = (digitalRead(BTN2_PIN) == LOW);
+    if (nowPressed && !btn2State.wasPressed) {
+      btn2State.pressedAt  = now;
+      btn2State.actionFired = false;
+    } else if (!nowPressed && btn2State.wasPressed) {
+      if (!btn2State.actionFired && (now - btn2State.pressedAt >= BTN_DEBOUNCE_MS)) {
+        // Short press: advance W brightness level (0→1→2→3→0)
+        wBrightLevel = (wBrightLevel + 1) % W_BRIGHT_LEVEL_COUNT;
+        saveButtonSettings();
+        DLOGI("BTN", "Button 2 short press: W level -> %d (%d/255)", wBrightLevel, W_BRIGHT_LEVELS[wBrightLevel]);
+      }
+    }
+    btn2State.wasPressed = nowPressed;
+  }
 }
 
 // ============================================================================
@@ -2725,6 +2841,7 @@ void setup() {
   
   captureBootInfo();
   setupLEDs();
+  setupButtons();
   loadEEPROMSettings();
   setupWiFi();
   setupDNS();
@@ -2738,6 +2855,8 @@ void setup() {
 }
 
 void loop() {
+  handleButtons();
+
   // Auto-connect: wait for a scan to finish so we have a channel hint, then connect.
   // Also handles retries after timeout (updateWiFiConnect triggers a rescan on timeout).
   if (!wifiConnected && !wifiConnect.active && savedSsid.length() > 0) {
