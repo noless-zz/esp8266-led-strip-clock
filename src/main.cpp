@@ -1846,94 +1846,87 @@ else{st.textContent='\u25b2 Update available: '+tag;st.style.color='#c80';}
 btn.disabled=false;
 }).catch(e=>{st.textContent='GitHub error: '+e;st.style.color='#c33';btn.disabled=false;});
 }).catch(e=>{st.textContent='Device error: '+e;st.style.color='#c33';btn.disabled=false;});}
+var _dfProxies=['','https://api.allorigins.win/raw?url=','https://thingproxy.freeboard.io/fetch/'];
+function _dfWaitReboot(btn,st,oldVer){
+  var phase='offline',ticks=0,iv=setInterval(function(){
+    ticks++;
+    if(ticks>60){clearInterval(iv);st.textContent='\u2717 Timeout \u2014 device did not come back';st.style.color='#c33';btn.disabled=false;return;}
+    fetch('/api/status').then(function(r){return r.json();}).then(function(s){
+      if(phase==='online'){
+        clearInterval(iv);
+        var nv=s.fw_version_base||'?';
+        if(oldVer&&nv===oldVer){st.textContent='\u2717 Rebooted but firmware unchanged ('+nv+') \u2014 bootloader rejected the image';st.style.color='#c33';btn.disabled=false;}
+        else{st.textContent='\u2713 Updated '+(oldVer?oldVer+' \u2192 ':'')+nv;st.style.color='#3a3';setTimeout(function(){location.reload();},2000);}
+      }
+    }).catch(function(){if(phase==='offline'){phase='online';st.textContent='Device rebooting, waiting for it to come back\u2026';}});
+  },1500);
+}
+function _dfUpload(btn,st,oldVer,blob){
+  st.textContent='Uploading to device\u2026';
+  var fd=new FormData();fd.append('firmware',blob,'firmware.bin');
+  var x=new XMLHttpRequest();
+  x.upload.addEventListener('progress',function(e){if(e.lengthComputable)st.textContent='Uploading: '+Math.round(e.loaded/e.total*100)+'%';});
+  x.addEventListener('load',function(){
+    var ok=false;
+    try{var j=JSON.parse(x.responseText);ok=(j.ok===true);}catch(e){ok=(x.status>=200&&x.status<300);}
+    console.log('[directFlash] upload response HTTP '+x.status+' ok='+ok+' body='+x.responseText.substring(0,200));
+    if(!ok){st.textContent='\u2717 Upload rejected (HTTP '+x.status+'): '+x.responseText.substring(0,100);st.style.color='#c33';btn.disabled=false;return;}
+    st.textContent='Upload done, waiting for reboot\u2026';
+    _dfWaitReboot(btn,st,oldVer);
+  });
+  x.addEventListener('error',function(){st.textContent='\u2717 Upload network error';st.style.color='#c33';btn.disabled=false;});
+  x.open('POST','/api/update?approve=1');x.send(fd);
+}
+function _dfPrecheck(btn,st,oldVer,buf){
+  var blob=new Blob([buf],{type:'application/octet-stream'});
+  var magic=new Uint8Array(buf,0,1)[0];
+  console.log('[directFlash] precheck size='+blob.size+' magic=0x'+magic.toString(16));
+  st.textContent='Checking firmware ('+Math.round(blob.size/1024)+' KB, magic=0x'+magic.toString(16)+')\u2026';
+  fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+magic)
+  .then(function(r){return r.json();}).then(function(d){
+    console.log('[directFlash] precheck response: ok='+d.ok+' err='+(d.error||'none')+' summary='+(d.summary||''));
+    if(!d.ok){st.textContent='\u2717 Precheck failed: '+(d.error||'unknown');st.style.color='#c33';btn.disabled=false;return;}
+    st.textContent='\u2713 Precheck OK: '+d.summary;
+    _dfUpload(btn,st,oldVer,blob);
+  }).catch(function(e){st.textContent='\u2717 Precheck error: '+e;st.style.color='#c33';btn.disabled=false;});
+}
+function _dfDownload(btn,st,oldVer,url,idx){
+  if(idx>=_dfProxies.length){
+    st.innerHTML='GitHub CORS blocked all proxies. <strong>Use the Download button above</strong>, save the .bin, then use the file picker below to upload.';
+    st.style.color='#a05000';btn.disabled=false;return;
+  }
+  var proxy=_dfProxies[idx];
+  var reqUrl=proxy?proxy+encodeURIComponent(url):url;
+  var label=proxy?('proxy: '+proxy.split('/')[2]):'direct';
+  st.textContent='Downloading firmware ('+label+')\u2026';
+  console.log('[directFlash] downloading idx='+idx+' url='+reqUrl);
+  var dl=new XMLHttpRequest();
+  dl.open('GET',reqUrl,true);dl.responseType='arraybuffer';
+  dl.onprogress=function(e){if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'% ('+label+')';};
+  dl.onerror=function(){console.log('[directFlash] dl onerror idx='+idx);st.textContent='Blocked ('+label+'), trying next\u2026';st.style.color='#888';_dfDownload(btn,st,oldVer,url,idx+1);};
+  dl.onload=function(){
+    console.log('[directFlash] dl onload idx='+idx+' status='+dl.status+' size='+(dl.response?dl.response.byteLength:0));
+    if(dl.status===403||dl.status===0||dl.status>=400){st.textContent='Got HTTP '+dl.status+' ('+label+'), trying next\u2026';st.style.color='#888';_dfDownload(btn,st,oldVer,url,idx+1);return;}
+    if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
+    var buf=dl.response;
+    if(!buf||buf.byteLength<4096){st.textContent='\u2717 Download too small ('+( buf?buf.byteLength:0)+' bytes) \u2014 likely a redirect page, not firmware';st.style.color='#c33';btn.disabled=false;return;}
+    console.log('[directFlash] download ok size='+buf.byteLength);
+    _dfPrecheck(btn,st,oldVer,buf);
+  };
+  dl.send();
+}
 function directFlash(){
-if(!_directUrl){alert('No firmware URL \u2014 run Check for Update first.');return;}
-if(!confirm('Flash firmware directly to device?\nYour browser will download the binary then upload it over the local network.'))return;
-const btn=document.getElementById('directFlashBtn');
-const st=document.getElementById('directFlashStatus');
-btn.disabled=true;st.style.display='block';st.style.color='#888';
-// Snapshot current version so we can verify it changed after reboot
-let _oldVer='';
-fetch('/api/status').then(r=>r.json()).then(s=>{_oldVer=s.fw_version_base||'';}).catch(()=>{});
-// Step 1: download binary.
-// github.com/releases/download/* redirects to objects.githubusercontent.com but github.com
-// does not send CORS headers on the 302, so browsers block direct XHR at the redirect step.
-// GitHub also blocks known public proxy IPs (corsproxy.io etc) with 403.
-// Strategy: try a chain of proxies; if all fail, show manual instructions.
-const _proxies=[
-  '',  // direct (works if browser already resolved CDN URL)
-  'https://api.allorigins.win/raw?url=',
-  'https://corsproxy.io/?url=',
-  'https://thingproxy.freeboard.io/fetch/',
-];
-let _proxyIdx=0;
-function _showManualFallback(){
-  st.innerHTML='GitHub blocks auto-download via CORS. '
-    +'<strong>Use the Download button above</strong>, then select the saved .bin file '
-    +'using the file picker below and click Upload Firmware.';
-  st.style.color='#a05000';btn.disabled=false;
+  if(!_directUrl){alert('No firmware URL \u2014 run Check for Update first.');return;}
+  if(!confirm('Flash firmware directly to device?\nYour browser downloads the binary, then uploads it to the device over local HTTP.'))return;
+  var btn=document.getElementById('directFlashBtn');
+  var st=document.getElementById('directFlashStatus');
+  btn.disabled=true;st.style.display='block';st.style.color='#888';st.textContent='Reading current version\u2026';
+  fetch('/api/status').then(function(r){return r.json();}).then(function(s){
+    var oldVer=s.fw_version_base||'';
+    console.log('[directFlash] current fw='+oldVer+' url='+_directUrl);
+    _dfDownload(btn,st,oldVer,_directUrl,0);
+  }).catch(function(){_dfDownload(btn,st,'',_directUrl,0);});
 }
-function _doDownload(){
-  if(_proxyIdx>=_proxies.length){_showManualFallback();return;}
-  const proxy=_proxies[_proxyIdx++];
-  const url=proxy?proxy+encodeURIComponent(_directUrl):_directUrl;
-  st.textContent=(proxy?'Trying proxy ('+(proxy.split('/')[2])+')\u2026':'Downloading firmware\u2026');
-  const dl=new XMLHttpRequest();
-  dl.open('GET',url,true);
-  dl.responseType='arraybuffer';
-  dl.onprogress=e=>{if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'%';};
-  dl.onerror=()=>{st.textContent='Proxy blocked, trying next\u2026';st.style.color='#888';_doDownload();};
-  dl.onload=()=>{
-  if(dl.status===403||dl.status===0){st.textContent='Proxy returned '+dl.status+', trying next\u2026';st.style.color='#888';_doDownload();return;}
-  if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed: HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
-const buf=dl.response;
-const blob=new Blob([buf],{type:'application/octet-stream'});
-// Step 2: pre-check
-st.textContent='Checking firmware ('+Math.round(blob.size/1024)+' KB)\u2026';
-const firstByte=new Uint8Array(buf,0,1)[0];
-fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+firstByte)
-.then(r=>r.json()).then(d=>{
-if(!d.ok)throw new Error(d.error||'Precheck failed');
-// Step 3: upload binary to device over plain HTTP
-st.textContent='Uploading to device\u2026';
-const fd=new FormData();fd.append('firmware',blob,'firmware.bin');
-const x=new XMLHttpRequest();
-x.upload.addEventListener('progress',e=>{if(e.lengthComputable)st.textContent='Uploading: '+Math.round(e.loaded/e.total*100)+'%';});
-x.onload=()=>{
-const resp=x.responseText||'';
-let uploadOk=false;
-try{const j=JSON.parse(resp);uploadOk=(j.ok===true);}catch(e){uploadOk=(x.status>=200&&x.status<300);}
-if(!uploadOk){st.textContent='\u2717 Upload rejected by device: '+(resp||'HTTP '+x.status);st.style.color='#c33';btn.disabled=false;return;}
-// Step 4: wait for device to go offline then come back, verify version changed
-st.textContent='Waiting for device to reboot\u2026';
-let phase='wait_offline',wait=0;
-const iv=setInterval(()=>{
-wait++;
-if(wait>60){clearInterval(iv);st.textContent='\u2717 Timeout \u2014 device did not come back';st.style.color='#c33';btn.disabled=false;return;}
-fetch('/api/status').then(r=>r.json()).then(s=>{
-if(phase==='wait_offline'){/* still up, keep waiting */}
-else if(phase==='wait_online'){
-clearInterval(iv);
-const newVer=s.fw_version_base||'?';
-if(_oldVer&&newVer===_oldVer){
-st.textContent='\u2717 Device rebooted but firmware unchanged ('+newVer+') \u2014 bootloader may have rejected the image';
-st.style.color='#c33';btn.disabled=false;
-}else{
-st.textContent='\u2713 Updated '+(_oldVer?_oldVer+' \u2192 ':'')+newVer;
-st.style.color='#3a3';setTimeout(()=>location.reload(),2000);
-}
-}
-}).catch(()=>{
-if(phase==='wait_offline'){phase='wait_online';st.textContent='Device offline, waiting for reboot\u2026';}
-});
-},1500);
-};
-x.onerror=()=>{st.textContent='\u2717 Upload error';st.style.color='#c33';btn.disabled=false;};
-x.open('POST','/api/update?approve=1');x.send(fd);
-}).catch(e=>{st.textContent='\u2717 '+e;st.style.color='#c33';btn.disabled=false;});
-};
-dl.send();}
-_doDownload();}
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
 function scanWifi(attempt=0){const list=document.getElementById('ssidList');const sb=document.getElementById('scanBtn');const ss=document.getElementById('scanStatus');
@@ -2854,16 +2847,19 @@ void loop() {
 
   ArduinoOTA.handle();
 
-  // Trigger NTP sync after WiFi connects (skip during OTA — competing TCP traffic)
+  // Trigger NTP sync after WiFi connects (skip during OTA or when heap is low)
   bool ntpSynced = (time(nullptr) > 86400);
   unsigned long ntpInterval = ntpSynced ? 3600000UL : 20000UL;
   bool otaActive = otaStatus.inProgress;
-  if (!otaActive && wifiConnected && millis() - lastNtpSync > ntpInterval) {
+  bool heapOk = (ESP.getFreeHeap() >= 22000);
+  if (!otaActive && heapOk && wifiConnected && millis() - lastNtpSync > ntpInterval) {
     syncTimeNTP();
+  } else if (!heapOk && wifiConnected) {
+    DLOGE("HEAP", "Skip NTP sync, heap too low: %u frag=%u", ESP.getFreeHeap(), ESP.getHeapFragmentation());
   }
 
-  // Refresh timezone daily if auto-detected (skip during OTA)
-  if (!otaActive && wifiConnected && tz.autoDetected && millis() - lastTzCheck > 86400000) {
+  // Refresh timezone daily if auto-detected (skip during OTA or low heap)
+  if (!otaActive && heapOk && wifiConnected && tz.autoDetected && millis() - lastTzCheck > 86400000) {
     detectTimezone();
   }
   
