@@ -2575,12 +2575,14 @@ void setupWebServer() {
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest *req) {
       bool success = !Update.hasError() && Update.isFinished();
+      // Response handler also runs in sys context — DLOGI/DLOGE send UDP which calls yield() → panic.
+      // Use Serial only here; the loop() heartbeat will pick up OTA completion for UDP logging.
       uint32_t written = (unsigned)Update.progress();
       if (success) {
-        DLOGI("OTA", "Web upload RESPONSE ok  written=%u  heap=%u", written, ESP.getFreeHeap());
+        Serial.printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
       } else {
-        DLOGE("OTA", "Web upload RESPONSE fail  written=%u  err=%u  errStr=%s  heap=%u",
-              written, (unsigned)Update.getError(), Update.getErrorString(), ESP.getFreeHeap());
+        Serial.printf("[OTA] RESPONSE fail  written=%u  err=%u  errStr=%s  heap=%u\n",
+                      written, (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
       }
       req->send(success ? 200 : 500, "application/json",
         String("{\"ok\":") + (success ? "true" : "false") +
@@ -2598,50 +2600,46 @@ void setupWebServer() {
         // from loop() to drain it; without that, all writes flush at once in one huge
         // blocking burst and the lwIP stack crashes (Soft WDT, exccause=4, 0x4024xxxx).
         uint32_t maxSize = getMaxUpdateSize();
-        DLOGI("OTA", "Web upload start  file=%s  maxSize=%u  heap=%u  frag=%u",
-              filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
+        // All logging in this callback MUST use Serial only.
+        // DLOGI/DLOGE send UDP packets which call yield() internally — illegal in sys context
+        // and causes "Panic core_esp8266_main.cpp:191 __yield  ctx: sys".
+        Serial.printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
+                      filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
         if (!Update.begin(maxSize, U_FLASH)) {
-          DLOGE("OTA", "Web upload begin FAILED  errCode=%u  errStr=%s  heap=%u",
-                (unsigned)Update.getError(), Update.getErrorString(), ESP.getFreeHeap());
-          Serial.println("[OTA] Update begin failed: " + String(Update.getErrorString()));
+          Serial.printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
+                        (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
           return;
         }
-        Serial.println("[OTA] Updating: " + filename);
         otaStatus.inProgress = true;
       }
 
-      // This callback runs in the lwIP/system context — yield() is illegal here and panics
-      // ("Panic core_esp8266_main.cpp __yield  ctx: sys"). wdtFeed() is safe in any context.
+      // wdtFeed() is safe in any context; yield() is not — do not add it here.
       ESP.wdtFeed();
       size_t written = Update.write(data, len);
       if (written != len) {
-        DLOGE("OTA", "Web upload write FAILED  offset=%u  want=%u  got=%u  errStr=%s",
-              (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString());
-        Update.printError(Serial);
+        Serial.printf("[OTA] write FAILED  offset=%u  want=%u  got=%u  %s\n",
+                      (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString().c_str());
       }
 
-      // Log progress every ~64 KB
+      // Print progress dot every chunk, newline every ~64 KB
       static uint32_t _lastLoggedKB = 0;
       uint32_t nowKB = (index + len) / 65536;
       if (nowKB != _lastLoggedKB) {
         _lastLoggedKB = nowKB;
-        DLOGI("OTA", "Web upload progress  offset=%u KB  heap=%u  frag=%u",
-              (index + len) / 1024, ESP.getFreeHeap(), ESP.getHeapFragmentation());
+        Serial.printf("[OTA] progress  %u KB  heap=%u  frag=%u\n",
+                      (index + len) / 1024, ESP.getFreeHeap(), ESP.getHeapFragmentation());
       }
 
       if (final) {
         _lastLoggedKB = 0;
         otaStatus.inProgress = false;
         if (Update.end(true)) {
-          DLOGI("OTA", "Web upload end OK  totalWritten=%u  heap=%u",
-                (unsigned)Update.progress(), ESP.getFreeHeap());
-          Serial.println("\n[OTA] Update Success!");
+          Serial.printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
+                        (unsigned)Update.progress(), ESP.getFreeHeap());
         } else {
-          DLOGE("OTA", "Web upload end FAILED  errCode=%u  errStr=%s  written=%u  heap=%u",
-                (unsigned)Update.getError(), Update.getErrorString(),
-                (unsigned)Update.progress(), ESP.getFreeHeap());
-          Serial.println("\n[OTA] Update Failed: " + String(Update.getErrorString()));
-          Update.printError(Serial);
+          Serial.printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
+                        (unsigned)Update.getError(), Update.getErrorString().c_str(),
+                        (unsigned)Update.progress(), ESP.getFreeHeap());
         }
       }
     }
