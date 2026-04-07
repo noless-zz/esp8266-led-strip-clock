@@ -5,6 +5,8 @@
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Updater.h>
 #include <time.h>
 
@@ -466,4 +468,104 @@ void updateMDNS() {
 
 void handleOTA() {
   ArduinoOTA.handle();
+}
+
+void doOtaFromUrl(const String& url) {
+  if (!wifiConnected) {
+    Serial.println("[OTA-URL] Not connected to WiFi");
+    return;
+  }
+  if (ESP.getFreeHeap() < 20000) {
+    Serial.printf("[OTA-URL] Heap too low: %u bytes\n", ESP.getFreeHeap());
+    return;
+  }
+
+  Serial.println("[OTA-URL] Starting: " + url);
+  DLOGI("OTA-URL", "Start  heap=%u", ESP.getFreeHeap());
+
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(30000);
+  if (!http.begin(client, url)) {
+    Serial.println("[OTA-URL] http.begin failed");
+    return;
+  }
+  http.addHeader("User-Agent", "LED-Clock-OTA/1.0");
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[OTA-URL] HTTP GET failed: %d\n", httpCode);
+    http.end();
+    return;
+  }
+
+  int contentLength = http.getSize();
+  uint32_t maxSize = getMaxUpdateSize();
+  Serial.printf("[OTA-URL] Content-Length: %d  maxSize: %u  heap: %u\n",
+                contentLength, maxSize, ESP.getFreeHeap());
+
+  if (contentLength > 0 && (uint32_t)contentLength > maxSize) {
+    Serial.printf("[OTA-URL] Firmware too large: %d > %u\n", contentLength, maxSize);
+    http.end();
+    return;
+  }
+
+  uint32_t updateSize = (contentLength > 0) ? (uint32_t)contentLength : maxSize;
+  if (!Update.begin(updateSize)) {
+    Serial.printf("[OTA-URL] Update.begin failed: %s\n", Update.getErrorString().c_str());
+    http.end();
+    return;
+  }
+
+  otaStatus.inProgress = true;
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[256];
+  size_t totalWritten = 0;
+  unsigned long lastData = millis();
+
+  while (http.connected() && (contentLength < 0 || totalWritten < (size_t)contentLength)) {
+    size_t available = stream->available();
+    if (available) {
+      size_t toRead = min((size_t)sizeof(buf), available);
+      size_t nread = stream->readBytes(buf, toRead);
+      if (nread > 0) {
+        size_t written = Update.write(buf, nread);
+        if (written != nread) {
+          Serial.printf("[OTA-URL] Update.write failed: wrote %u of %u  err=%s\n",
+                        (unsigned)written, (unsigned)nread, Update.getErrorString().c_str());
+          break;
+        }
+        totalWritten += nread;
+        lastData = millis();
+        if (totalWritten % 65536 == 0) {
+          Serial.printf("[OTA-URL] Progress: %u KB  heap=%u\n",
+                        (unsigned)(totalWritten / 1024), ESP.getFreeHeap());
+        }
+      }
+    } else {
+      if (millis() - lastData > 15000) {
+        Serial.println("[OTA-URL] Stream read timeout");
+        break;
+      }
+      ESP.wdtFeed();
+      delay(1);
+    }
+  }
+
+  http.end();
+  otaStatus.inProgress = false;
+
+  if (Update.end(true)) {
+    Serial.printf("[OTA-URL] Flash OK  written=%u bytes  rebooting\n", (unsigned)totalWritten);
+    DLOGI("OTA-URL", "OK  written=%u  rebooting", (unsigned)totalWritten);
+    delay(500);
+    ESP.restart();
+  } else {
+    Serial.printf("[OTA-URL] Update.end FAILED: %s\n", Update.getErrorString().c_str());
+    DLOGE("OTA-URL", "FAILED  err=%s  written=%u",
+          Update.getErrorString().c_str(), (unsigned)totalWritten);
+  }
 }

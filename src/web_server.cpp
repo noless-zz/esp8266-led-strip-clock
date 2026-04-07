@@ -548,6 +548,26 @@ void setupWebServer() {
     }
   );
   
+  // API: OTA from URL (device downloads firmware from GitHub and flashes itself)
+  server.on("/api/update/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!req->hasParam("url")) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing url parameter\"}");
+      return;
+    }
+    if (!wifiConnected) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Device not connected to WiFi\"}");
+      return;
+    }
+    String url = req->getParam("url")->value();
+    if (url.length() == 0) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Empty URL\"}");
+      return;
+    }
+    otaFromUrl = url;
+    otaFromUrlAt = millis();
+    req->send(202, "application/json", "{\"ok\":true,\"status\":\"downloading\"}");
+  });
+
   // Catchall
   server.onNotFound([](AsyncWebServerRequest *req) {
     req->redirect("http://" + WiFi.softAPIP().toString() + "/");

@@ -16,3 +16,4 @@ const char* updateErrorToString(uint8_t error);
 void processDNS();
 void updateMDNS();
 void handleOTA();
+void doOtaFromUrl(const String& url);
