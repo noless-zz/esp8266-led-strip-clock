@@ -484,6 +484,10 @@ void doOtaFromUrl(const String& url) {
   DLOGI("OTA-URL", "Start  heap=%u", ESP.getFreeHeap());
 
   BearSSL::WiFiClientSecure client;
+  // Certificate validation is skipped: the firmware URL comes from the GitHub
+  // Releases API (fetched by the browser over its own validated TLS connection),
+  // and ESP8266 BearSSL cannot verify github.com / objects.githubusercontent.com
+  // certificate chains without embedding a CA bundle into the firmware.
   client.setInsecure();
 
   HTTPClient http;
