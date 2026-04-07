@@ -237,6 +237,8 @@ void setupWebServer() {
 
       if (Update.write(data, len) != len) {
         Update.printError(Serial);
+        Update.end(false);  // Abort the update to prevent corrupted flash
+        return;
       }
 
       if (final) {
