@@ -477,10 +477,12 @@ void setupWebServer() {
   // API: OTA Upload
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest *req) {
-      bool success = !Update.hasError() && Update.isFinished();
       // Response handler also runs in sys context — DLOGI/DLOGE send UDP which calls yield() → panic.
       // Use Serial only here; the loop() heartbeat will pick up OTA completion for UDP logging.
+      // written > 0 guards against a false-positive success when Update was never started
+      // (Updater resets _size=_progress=0 after end(), making isFinished() true by default).
       uint32_t written = (unsigned)Update.progress();
+      bool success = !Update.hasError() && Update.isFinished() && written > 0;
       if (success) {
         Serial.printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
       } else {
@@ -489,11 +491,14 @@ void setupWebServer() {
       }
       req->send(success ? 200 : 500, "application/json",
         String("{\"ok\":") + (success ? "true" : "false") +
-        ",\"written\":" + written +
+        ",\"written\":" + String(written) +
         ",\"error\":\"" + (success ? "" : String(Update.getErrorString())) + "\"}");
       if (success) {
-        delay(500);
-        ESP.restart();
+        // delay() is not safe in sys context (calls yield() → panic).
+        // Schedule the restart from loop() context instead; 500 ms gives lwIP time to
+        // flush the HTTP response before the device reboots.
+        otaRestartPending = true;
+        otaRestartAt = millis();
       }
     },
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {

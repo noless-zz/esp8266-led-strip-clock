@@ -79,6 +79,8 @@ TzDiagState tzDiag;
 OTAStatus otaStatus;
 String otaFromUrl = "";
 unsigned long otaFromUrlAt = 0;
+bool otaRestartPending = false;
+unsigned long otaRestartAt = 0;
 
 // Debug globals
 bool debugRemoteEnabled = false;
@@ -280,6 +282,15 @@ void loop() {
               wifiConnected ? WiFi.RSSI() : 0);
       }
     }
+  }
+
+  // Deferred restart after multipart OTA upload (set by /api/update response handler).
+  // The response handler runs in sys context where delay() is unsafe; the restart is
+  // deferred here so the HTTP response has time to be sent before the device reboots.
+  if (otaRestartPending && millis() - otaRestartAt > 500) {
+    otaRestartPending = false;
+    Serial.println("[OTA] Restarting after upload...");
+    ESP.restart();
   }
 
   // Dispatch server-side OTA-from-URL (queued by /api/update/from-url handler)
