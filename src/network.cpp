@@ -526,6 +526,13 @@ void doOtaFromUrl(const String& url) {
 
   otaStatus.inProgress = true;
   WiFiClient* stream = http.getStreamPtr();
+  if (!stream) {
+    Serial.println("[OTA-URL] getStreamPtr returned null, aborting");
+    Update.end(false);
+    http.end();
+    otaStatus.inProgress = false;
+    return;
+  }
   uint8_t buf[256];
   size_t totalWritten = 0;
   unsigned long lastData = millis();
@@ -564,8 +571,9 @@ void doOtaFromUrl(const String& url) {
 
   if (Update.end(true)) {
     Serial.printf("[OTA-URL] Flash OK  written=%u bytes  rebooting\n", (unsigned)totalWritten);
-    DLOGI("OTA-URL", "OK  written=%u  rebooting", (unsigned)totalWritten);
-    delay(500);
+    // Do NOT call DLOGI or delay() here: both yield, and any yield after Update.end()
+    // can fire the /api/update response handler (which sees the now-reset Update state
+    // as written=0, success=true) and then calls delay() in sys context → crash.
     ESP.restart();
   } else {
     Serial.printf("[OTA-URL] Update.end FAILED: %s\n", Update.getErrorString().c_str());

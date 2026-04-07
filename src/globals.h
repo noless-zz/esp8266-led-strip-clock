@@ -69,6 +69,8 @@ extern TzDiagState tzDiag;
 extern OTAStatus otaStatus;
 extern String otaFromUrl;
 extern unsigned long otaFromUrlAt;
+extern bool otaRestartPending;
+extern unsigned long otaRestartAt;
 
 // ============================================================================
 // Debug globals
