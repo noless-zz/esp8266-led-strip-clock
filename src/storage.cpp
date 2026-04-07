@@ -101,11 +101,13 @@ void loadEEPROMSettings() {
   uint8_t revFlag = EEPROM.read(EEPROM_REVERSED_ADDR);
   if (revFlag == 0x01 || revFlag == 0x00) ledReversed = (revFlag == 0x01);
   
-  // Load timezone offset
-  int32_t tzOff = (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 0) << 24) |
-                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 1) << 16) |
-                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 2) << 8) |
-                  (EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 3));
+  // Load timezone offset — accumulate via uint32_t to avoid signed-shift UB,
+  // then reinterpret as int32_t.
+  uint32_t tzRaw = ((uint32_t)(uint8_t)EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 0) << 24) |
+                   ((uint32_t)(uint8_t)EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 1) << 16) |
+                   ((uint32_t)(uint8_t)EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 2) << 8)  |
+                    (uint32_t)(uint8_t)EEPROM.read(EEPROM_TZ_OFFSET_ADDR + 3);
+  int32_t tzOff = (int32_t)tzRaw;
   if (tzOff != 0 && tzOff >= -43200 && tzOff <= 43200) tz.utcOffset = tzOff;
   
   // Load display mode
@@ -124,7 +126,7 @@ void loadEEPROMSettings() {
     uint16_t pHi = EEPROM.read(EEPROM_DBG_PORT_ADDR);
     uint16_t pLo = EEPROM.read(EEPROM_DBG_PORT_ADDR + 1);
     uint16_t p = (pHi << 8) | pLo;
-    if (p > 0 && p < 65535) debugServerPort = p;
+    if (p > 0 && p <= 65535) debugServerPort = p;
   }
 
   // Load Simple fade duration (0=off, 50–2000ms valid range)

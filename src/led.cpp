@@ -414,23 +414,24 @@ void displayMode_Flame() {
   if (!extractClock(hour12, hour24, minute, second, daySeconds)) return;
   const ModeDisplayConfig &cfg = modeConfigs[DISPLAY_FLAME];
 
-  // Optimize: update flame only every 50ms (20 times/sec instead of 60)
+  // Update the flame phase at most 20 times/sec, but always rewrite leds[]
+  // from the saved phase so applyBrightnessAndShow() never re-scales stale values.
   static uint32_t lastUpdate = 0;
+  static uint32_t phase = 0;
   uint32_t now = millis();
-  
-  if (now - lastUpdate > 50) {  // Update max 20 times/sec instead of 60
+
+  if (now - lastUpdate > 50) {  // Advance phase max 20 times/sec
     lastUpdate = now;
-    uint32_t phase = now / 40;  // Slower phase calculation
-    
-    for (int i = 0; i < NUM_LEDS; i++) {
-      // Simplified pseudo-random without heavy multiplication
-      uint32_t x = (uint32_t)(i * 41 + phase * 7);
-      uint8_t flicker = (uint8_t)((x ^ (x >> 4)) & 0x3F);  // Reduced bit ops
-      uint8_t r = 80 + flicker;
-      uint8_t g = 15 + flicker / 3;
-      uint8_t b = 2;
-      leds[i] = {r, g, b};
-    }
+    phase = now / 40;
+  }
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint32_t x = (uint32_t)(i * 41 + phase * 7);
+    uint8_t flicker = (uint8_t)((x ^ (x >> 4)) & 0x3F);
+    uint8_t r = 80 + flicker;
+    uint8_t g = 15 + flicker / 3;
+    uint8_t b = 2;
+    leds[i] = {r, g, b};
   }
 
   overlayTimeMarkers(hour12, minute, second, cfg, 9);
@@ -451,7 +452,10 @@ void displayBootAnimation() {
     { 0, 70, 70, 59, 25},   // NTP_WAIT -- cyan
   };
 
-  const StageStyle& s = styles[(int)bootStage];
+  int stageIdx = (int)bootStage;
+  if (stageIdx >= (int)(sizeof(styles) / sizeof(styles[0])))
+    stageIdx = (int)(sizeof(styles) / sizeof(styles[0])) - 1;
+  const StageStyle& s = styles[stageIdx];
 
   static int  pos       = 0;
   static int  dir       = 1;
