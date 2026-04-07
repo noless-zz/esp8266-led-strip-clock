@@ -77,6 +77,8 @@ TzDiagState tzDiag;
 
 // OTA globals
 OTAStatus otaStatus;
+String otaFromUrl = "";
+unsigned long otaFromUrlAt = 0;
 
 // Debug globals
 bool debugRemoteEnabled = false;
@@ -278,6 +280,13 @@ void loop() {
               wifiConnected ? WiFi.RSSI() : 0);
       }
     }
+  }
+
+  // Dispatch server-side OTA-from-URL (queued by /api/update/from-url handler)
+  if (otaFromUrl.length() > 0 && millis() - otaFromUrlAt > 500) {
+    String url = otaFromUrl;
+    otaFromUrl = "";
+    doOtaFromUrl(url);
   }
 
   // Update LED clock display

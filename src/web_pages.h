@@ -364,7 +364,6 @@ else{st.textContent='\u25b2 Update available: '+tag;st.style.color='#c80';}
 btn.disabled=false;
 }).catch(e=>{st.textContent='GitHub error: '+e;st.style.color='#c33';btn.disabled=false;});
 }).catch(e=>{st.textContent='Device error: '+e;st.style.color='#c33';btn.disabled=false;});}
-var _dfProxies=['','https://api.allorigins.win/raw?url=','https://thingproxy.freeboard.io/fetch/'];
 function _dfWaitReboot(btn,st,oldVer){
   var phase='offline',ticks=0,iv=setInterval(function(){
     ticks++;
@@ -379,71 +378,26 @@ function _dfWaitReboot(btn,st,oldVer){
     }).catch(function(){if(phase==='offline'){phase='online';st.textContent='Device rebooting, waiting for it to come back\u2026';}});
   },1500);
 }
-function _dfUpload(btn,st,oldVer,blob){
-  st.textContent='Uploading to device\u2026';
-  var fd=new FormData();fd.append('firmware',blob,'firmware.bin');
-  var x=new XMLHttpRequest();
-  x.upload.addEventListener('progress',function(e){if(e.lengthComputable)st.textContent='Uploading: '+Math.round(e.loaded/e.total*100)+'%';});
-  x.addEventListener('load',function(){
-    var ok=false;
-    try{var j=JSON.parse(x.responseText);ok=(j.ok===true);}catch(e){ok=(x.status>=200&&x.status<300);}
-    console.log('[directFlash] upload response HTTP '+x.status+' ok='+ok+' body='+x.responseText.substring(0,200));
-    if(!ok){st.textContent='\u2717 Upload rejected (HTTP '+x.status+'): '+x.responseText.substring(0,100);st.style.color='#c33';btn.disabled=false;return;}
-    st.textContent='Upload done, waiting for reboot\u2026';
-    _dfWaitReboot(btn,st,oldVer);
-  });
-  x.addEventListener('error',function(){st.textContent='\u2717 Upload network error';st.style.color='#c33';btn.disabled=false;});
-  x.open('POST','/api/update?approve=1');x.send(fd);
-}
-function _dfPrecheck(btn,st,oldVer,buf){
-  var blob=new Blob([buf],{type:'application/octet-stream'});
-  var magic=new Uint8Array(buf,0,1)[0];
-  console.log('[directFlash] precheck size='+blob.size+' magic=0x'+magic.toString(16));
-  st.textContent='Checking firmware ('+Math.round(blob.size/1024)+' KB, magic=0x'+magic.toString(16)+')\u2026';
-  fetch('/api/update/precheck?name=firmware.bin&size='+blob.size+'&magic='+magic)
+function _dfFlashFromDevice(btn,st,oldVer,url){
+  st.textContent='Sending download request to device\u2026';
+  fetch('/api/update/from-url?url='+encodeURIComponent(url),{method:'POST'})
   .then(function(r){return r.json();}).then(function(d){
-    console.log('[directFlash] precheck response: ok='+d.ok+' err='+(d.error||'none')+' summary='+(d.summary||''));
-    if(!d.ok){st.textContent='\u2717 Precheck failed: '+(d.error||'unknown');st.style.color='#c33';btn.disabled=false;return;}
-    st.textContent='\u2713 Precheck OK: '+d.summary;
-    _dfUpload(btn,st,oldVer,blob);
-  }).catch(function(e){st.textContent='\u2717 Precheck error: '+e;st.style.color='#c33';btn.disabled=false;});
-}
-function _dfDownload(btn,st,oldVer,url,idx){
-  if(idx>=_dfProxies.length){
-    st.innerHTML='GitHub CORS blocked all proxies. <strong>Use the Download button above</strong>, save the .bin, then use the file picker below to upload.';
-    st.style.color='#a05000';btn.disabled=false;return;
-  }
-  var proxy=_dfProxies[idx];
-  var reqUrl=proxy?proxy+encodeURIComponent(url):url;
-  var label=proxy?('proxy: '+proxy.split('/')[2]):'direct';
-  st.textContent='Downloading firmware ('+label+')\u2026';
-  console.log('[directFlash] downloading idx='+idx+' url='+reqUrl);
-  var dl=new XMLHttpRequest();
-  dl.open('GET',reqUrl,true);dl.responseType='arraybuffer';
-  dl.onprogress=function(e){if(e.lengthComputable)st.textContent='Downloading: '+Math.round(e.loaded/e.total*100)+'% ('+label+')';};
-  dl.onerror=function(){console.log('[directFlash] dl onerror idx='+idx);st.textContent='Blocked ('+label+'), trying next\u2026';st.style.color='#888';_dfDownload(btn,st,oldVer,url,idx+1);};
-  dl.onload=function(){
-    console.log('[directFlash] dl onload idx='+idx+' status='+dl.status+' size='+(dl.response?dl.response.byteLength:0));
-    if(dl.status===403||dl.status===0||dl.status>=400){st.textContent='Got HTTP '+dl.status+' ('+label+'), trying next\u2026';st.style.color='#888';_dfDownload(btn,st,oldVer,url,idx+1);return;}
-    if(dl.status<200||dl.status>=300){st.textContent='\u2717 Download failed HTTP '+dl.status;st.style.color='#c33';btn.disabled=false;return;}
-    var buf=dl.response;
-    if(!buf||buf.byteLength<4096){st.textContent='\u2717 Download too small ('+( buf?buf.byteLength:0)+' bytes) \u2014 likely a redirect page, not firmware';st.style.color='#c33';btn.disabled=false;return;}
-    console.log('[directFlash] download ok size='+buf.byteLength);
-    _dfPrecheck(btn,st,oldVer,buf);
-  };
-  dl.send();
+    if(!d.ok){st.textContent='\u2717 '+(d.error||'Unknown error');st.style.color='#c33';btn.disabled=false;return;}
+    st.textContent='Device is downloading firmware from GitHub\u2026';
+    _dfWaitReboot(btn,st,oldVer);
+  }).catch(function(e){st.textContent='\u2717 Request failed: '+e;st.style.color='#c33';btn.disabled=false;});
 }
 function directFlash(){
   if(!_directUrl){alert('No firmware URL \u2014 run Check for Update first.');return;}
-  if(!confirm('Flash firmware directly to device?\nYour browser downloads the binary, then uploads it to the device over local HTTP.'))return;
+  if(!confirm('Flash firmware directly to device?\nThe device will download the firmware from GitHub and flash itself.'))return;
   var btn=document.getElementById('directFlashBtn');
   var st=document.getElementById('directFlashStatus');
   btn.disabled=true;st.style.display='block';st.style.color='#888';st.textContent='Reading current version\u2026';
   fetch('/api/status').then(function(r){return r.json();}).then(function(s){
     var oldVer=s.fw_version_base||'';
     console.log('[directFlash] current fw='+oldVer+' url='+_directUrl);
-    _dfDownload(btn,st,oldVer,_directUrl,0);
-  }).catch(function(){_dfDownload(btn,st,'',_directUrl,0);});
+    _dfFlashFromDevice(btn,st,oldVer,_directUrl);
+  }).catch(function(){_dfFlashFromDevice(btn,st,'',_directUrl);});
 }
 var _scanData=[];
 function networkSelected(){const list=document.getElementById('ssidList');const ssid=list.value;if(!ssid)return;document.getElementById('wifiSsid').value=ssid;const net=_scanData.find(n=>n.ssid===ssid);const ol=document.getElementById('openLabel');if(net&&!net.enc){document.getElementById('wifiPass').value='';ol.textContent='open network';ol.style.color='#4a4';}else{ol.textContent='';}}
