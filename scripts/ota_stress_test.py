@@ -323,7 +323,7 @@ def _phase_b(base: str) -> "tuple[bool, str]":
 # Main stress test runner (SCons action callback)
 # ============================================================================
 
-def _run_ota_stress(target, source, _env_scons) -> None:
+def _run_ota_stress(target, source, env) -> None:
     global _log_file
 
     project_dir = env.subst("$PROJECT_DIR")  # noqa: F821
