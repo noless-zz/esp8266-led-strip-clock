@@ -479,20 +479,23 @@ void setupWebServer() {
     [](AsyncWebServerRequest *req) {
       // Response handler also runs in sys context — DLOGI/DLOGE send UDP which calls yield() → panic.
       // Use Serial only here; the loop() heartbeat will pick up OTA completion for UDP logging.
-      // written > 0 guards against a false-positive success when Update was never started
-      // (Updater resets _size=_progress=0 after end(), making isFinished() true by default).
-      uint32_t written = (unsigned)Update.progress();
-      bool success = !Update.hasError() && Update.isFinished() && written > 0;
+      //
+      // Read outcome from otaStatus, which the upload callback populated BEFORE calling
+      // Update.end().  Do NOT call Update.progress() here: Update.end() calls _reset()
+      // internally, which zeroes _progress, so Update.progress() always returns 0 by the
+      // time this response handler runs (causing a false-negative "written=0" failure).
+      uint32_t written = otaStatus.writtenBytes;
+      bool success = otaStatus.lastSuccess && (written > 0);
       if (success) {
         Serial.printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
       } else {
-        Serial.printf("[OTA] RESPONSE fail  written=%u  err=%u  errStr=%s  heap=%u\n",
-                      written, (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
+        Serial.printf("[OTA] RESPONSE fail  written=%u  errStr=%s  heap=%u\n",
+                      written, otaStatus.lastErrorText.c_str(), ESP.getFreeHeap());
       }
       req->send(success ? 200 : 500, "application/json",
         String("{\"ok\":") + (success ? "true" : "false") +
         ",\"written\":" + String(written) +
-        ",\"error\":\"" + (success ? "" : String(Update.getErrorString())) + "\"}");
+        ",\"error\":\"" + (success ? "" : otaStatus.lastErrorText) + "\"}");
       if (success) {
         // delay() is not safe in sys context (calls yield() → panic).
         // Schedule the restart from loop() context instead; 500 ms gives lwIP time to
@@ -502,7 +505,22 @@ void setupWebServer() {
       }
     },
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+      // _beginOk tracks whether Update.begin() succeeded for this upload so that
+      // subsequent chunks and the final-chunk cleanup can be skipped safely when it did not.
+      static bool _beginOk = false;
+
       if (index == 0) {
+        // Reset per-upload state at the start of every new upload.
+        _beginOk = false;
+        otaStatus.inProgress    = false;
+        otaStatus.lastSuccess   = false;
+        otaStatus.writtenBytes  = 0;
+        otaStatus.lastErrorCode = 0;
+        otaStatus.lastErrorText = "";
+        otaStatus.lastFileName  = filename;
+        otaStatus.startedAt     = millis();
+        otaStatus.finishedAt    = 0;
+
         // runAsync(false) = synchronous writes — we feed WDT manually between chunks.
         // runAsync(true) defers writes to a queue but Update.process() must be called
         // from loop() to drain it; without that, all writes flush at once in one huge
@@ -514,12 +532,19 @@ void setupWebServer() {
         Serial.printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
                       filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
         if (!Update.begin(maxSize, U_FLASH)) {
+          otaStatus.lastErrorCode = Update.getError();
+          otaStatus.lastErrorText = Update.getErrorString();
           Serial.printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
                         (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
           return;
         }
+        _beginOk = true;
         otaStatus.inProgress = true;
       }
+
+      // Skip write processing when begin() failed — Update was never started so
+      // Update.write() would silently return 0 and pollute the log.
+      if (!_beginOk) return;
 
       // wdtFeed() is safe in any context; yield() is not — do not add it here.
       ESP.wdtFeed();
@@ -529,7 +554,7 @@ void setupWebServer() {
                       (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString().c_str());
       }
 
-      // Print progress dot every chunk, newline every ~64 KB
+      // Print progress every ~64 KB
       static uint32_t _lastLoggedKB = 0;
       uint32_t nowKB = (index + len) / 65536;
       if (nowKB != _lastLoggedKB) {
@@ -540,14 +565,23 @@ void setupWebServer() {
 
       if (final) {
         _lastLoggedKB = 0;
+        _beginOk = false;
         otaStatus.inProgress = false;
+        // Save progress BEFORE Update.end(): end() calls _reset() which zeroes _progress,
+        // so Update.progress() would return 0 if read after end() returns.
+        otaStatus.writtenBytes = Update.progress();
         if (Update.end(true)) {
+          otaStatus.lastSuccess  = true;
+          otaStatus.finishedAt   = millis();
           Serial.printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
-                        (unsigned)Update.progress(), ESP.getFreeHeap());
+                        otaStatus.writtenBytes, ESP.getFreeHeap());
         } else {
+          otaStatus.lastSuccess   = false;
+          otaStatus.lastErrorCode = Update.getError();
+          otaStatus.lastErrorText = Update.getErrorString();
           Serial.printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
                         (unsigned)Update.getError(), Update.getErrorString().c_str(),
-                        (unsigned)Update.progress(), ESP.getFreeHeap());
+                        otaStatus.writtenBytes, ESP.getFreeHeap());
         }
       }
     }
