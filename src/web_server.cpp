@@ -505,13 +505,16 @@ void setupWebServer() {
       }
     },
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-      // _beginOk tracks whether Update.begin() succeeded for this upload so that
-      // subsequent chunks and the final-chunk cleanup can be skipped safely when it did not.
-      static bool _beginOk = false;
+      // Static state shared across all chunks of a single upload.  The ESP8266 is
+      // single-threaded and ESPAsyncWebServer never overlaps upload callbacks, so
+      // these are safe without additional synchronisation.
+      static bool     _beginOk      = false;  // true after Update.begin() succeeds
+      static uint32_t _lastLoggedKB = 0;      // tracks last logged progress band
 
       if (index == 0) {
         // Reset per-upload state at the start of every new upload.
-        _beginOk = false;
+        _beginOk      = false;
+        _lastLoggedKB = 0;
         otaStatus.inProgress    = false;
         otaStatus.lastSuccess   = false;
         otaStatus.writtenBytes  = 0;
@@ -555,7 +558,6 @@ void setupWebServer() {
       }
 
       // Print progress every ~64 KB
-      static uint32_t _lastLoggedKB = 0;
       uint32_t nowKB = (index + len) / 65536;
       if (nowKB != _lastLoggedKB) {
         _lastLoggedKB = nowKB;
