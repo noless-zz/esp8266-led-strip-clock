@@ -475,9 +475,11 @@ void setupWebServer() {
   });
   
   // API: OTA from URL (device downloads firmware from GitHub and flashes itself).
-  // Registered BEFORE /api/update so that ESPAsyncWebServer matches this exact
-  // path first and does not accidentally route it into the upload handler below.
-  server.on("/api/update/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
+  // Uses /api/ota/from-url (not a sub-path of /api/update) to avoid
+  // ESPAsyncWebServer's prefix-match behaviour, where /api/update would
+  // otherwise also match /api/update/from-url and dispatch to the binary-upload
+  // handler instead, returning 500.
+  server.on("/api/ota/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
     if (!req->hasParam("url")) {
       req->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing url parameter\"}");
       return;
