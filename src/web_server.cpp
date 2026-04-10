@@ -545,18 +545,20 @@ void setupWebServer() {
       }
     },
     // ── Upload callback (SYS context) ────────────────────────────────────────
-    // MUST NOT call Update.write() or Update.end() here: both eventually call
-    // _writeBuffer() → yield() → panic ("__yield ctx: sys").
-    // All flash writes are deferred to loop() via the otaAsync ring buffer.
+    // MUST NOT call Update.begin(), Update.write(), or Update.end() here: all
+    // three internally call yield() → panic ("__yield ctx: sys").
+    // All Updater calls are deferred to loop() via the otaAsync ring buffer.
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
       if (index == 0) {
         // ── First chunk: initialise per-upload state ─────────────────────────
         otaAsync.head        = 0;
         otaAsync.tail        = 0;
         otaAsync.active      = false;
+        otaAsync.beginNeeded = false;
         otaAsync.beginOk     = false;
         otaAsync.uploadFinal = false;
         otaAsync.overflowed  = false;
+        otaAsync.maxSize     = 0;
         otaAsync.req         = nullptr;
 
         otaStatus.inProgress    = false;
@@ -575,28 +577,22 @@ void setupWebServer() {
         if (otaAsync.data == nullptr) {
           ets_printf("[OTA] FAILED to allocate ring buffer (%u B)  heap=%u\n",
                        (unsigned)OtaAsyncBuf::CAP, ESP.getFreeHeap());
-          return;  // beginOk stays false → response handler sends 500
+          return;  // active stays false → response handler sends 500
         }
-
-        // Abort any leftover Updater state from a previously interrupted upload.
-        Update.end(false);
 
         uint32_t maxSize = getMaxUpdateSize();
         ets_printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
                       filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
-        if (!Update.begin(maxSize, U_FLASH)) {
-          otaStatus.lastErrorCode = Update.getError();
-          otaStatus.lastErrorText = Update.getErrorString();
-          ets_printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
-                        (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
-          return;  // beginOk stays false
-        }
-        otaAsync.beginOk      = true;
-        otaAsync.active       = true;
-        otaStatus.inProgress  = true;
+
+        // Defer Update.end(false) + Update.begin() to loop() (CONT context).
+        // In ESP8266 Arduino core 3.x, Update.begin() erases a flash sector and
+        // internally calls yield() for watchdog feeding — which panics in SYS context.
+        otaAsync.maxSize     = maxSize;
+        otaAsync.beginNeeded = true;
+        otaAsync.active      = true;
       }
 
-      if (!otaAsync.beginOk) return;  // begin() failed — discard remaining chunks
+      if (!otaAsync.active) return;  // begin() failed in loop() — discard remaining chunks
 
       // ── Copy chunk into ring buffer (no flash writes, no yield) ────────────
       uint32_t avail = OtaAsyncBuf::CAP - (otaAsync.head - otaAsync.tail);

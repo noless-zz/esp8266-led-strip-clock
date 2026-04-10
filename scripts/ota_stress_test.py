@@ -366,7 +366,7 @@ def _phase_b(base: str) -> "tuple[bool, str]":
 
     trigger_url = f"{base}/api/ota/from-url?url={_url_quote(fw_url, safe='')}"
     try:
-        resp = _post_json(trigger_url, timeout=15.0)
+        resp = _get_json(trigger_url, timeout=15.0)
     except Exception as exc:
         return False, f"from-url trigger request failed: {exc}"
 
