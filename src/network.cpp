@@ -10,10 +10,6 @@
 #include <Updater.h>
 #include <time.h>
 
-// ets_printf() is an ESP8266 ROM function that writes directly to the UART FIFO
-// (busy-wait, never yields) and is safe to call from SYS / interrupt context.
-extern "C" int ets_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
-
 void syncTimeNTP() {
   if (!wifiConnected) return;
   // Only show NTP_WAIT animation during initial boot (not on hourly refreshes)
@@ -418,21 +414,20 @@ void setupWiFi() {
   Serial.println("[WiFi] Starting AP+STA mode...");
   WiFi.mode(WIFI_AP_STA);
 
-  // Log when a device connects/disconnects from our AP.
-  // WiFi event callbacks run in SYS (interrupt) context — use ets_printf(), not
-  // Serial.printf().  Serial.printf() can call yield() when the TX ring buffer is full,
-  // which crashes the device from interrupt context.
+  // Log when a device connects/disconnects from our AP
   WiFi.onSoftAPModeStationConnected([](const WiFiEventSoftAPModeStationConnected& e) {
     char mac[18];
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              e.mac[0], e.mac[1], e.mac[2], e.mac[3], e.mac[4], e.mac[5]);
-    ets_printf("[AP] Client connected:    MAC=%s  aid=%d\n", mac, e.aid);
+    Serial.printf("[AP] Client connected:    MAC=%s  aid=%d  clients=%d\n",
+                  mac, e.aid, WiFi.softAPgetStationNum());
   });
   WiFi.onSoftAPModeStationDisconnected([](const WiFiEventSoftAPModeStationDisconnected& e) {
     char mac[18];
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              e.mac[0], e.mac[1], e.mac[2], e.mac[3], e.mac[4], e.mac[5]);
-    ets_printf("[AP] Client disconnected: MAC=%s  aid=%d\n", mac, e.aid);
+    Serial.printf("[AP] Client disconnected: MAC=%s  aid=%d  clients=%d\n",
+                  mac, e.aid, WiFi.softAPgetStationNum());
   });
 
   WiFi.softAP(AP_SSID, AP_PASS);
