@@ -8,7 +8,10 @@ Each cycle exercises two OTA paths:
   Phase B — GitHub URL download : POST /api/update/from-url?url=<url>
 
 Environment variable overrides (all optional):
-    OTA_STRESS_SERIAL       serial port to monitor      (default /dev/ttyUSB0)
+    OTA_STRESS_SERIAL       serial port to monitor      (default: auto-detect first
+                            available port; set to empty string or 'auto' to
+                            auto-detect; can also be set in platformio.ini as
+                            OTA_STRESS_SERIAL = <value> under [env:ota_stress])
     LED_CLOCK_TEST_BASE_URL device HTTP base URL         (default http://ledclock.local)
     OTA_STRESS_FW_URL       firmware URL for Phase B     (default: latest GitHub release asset)
 """
@@ -36,8 +39,32 @@ URL_OTA_WAIT_SEC   = 90      # max seconds to wait for [OTA-URL] Flash OK on ser
 UPLOAD_TIMEOUT_SEC = 120.0   # HTTP timeout for the multipart firmware POST
 
 # Runtime overrides via environment variables
-_env_serial  = os.getenv("OTA_STRESS_SERIAL", "").strip()
-SERIAL_PORT  = _env_serial if _env_serial else "/dev/ttyUSB0"
+# OTA_STRESS_SERIAL may also be set in platformio.ini under [env:ota_stress].
+# Precedence: OS env > platformio.ini > auto-detect > platform default.
+def _resolve_serial_port() -> str:
+    """Return the serial port to use for capture, or '' if none available."""
+    # 1. OS environment variable
+    val = os.getenv("OTA_STRESS_SERIAL", "").strip()
+    # 2. Fallback: platformio.ini project option (SCons env, available in extra_scripts)
+    if not val:
+        try:
+            val = env.GetProjectOption("OTA_STRESS_SERIAL", "").strip()  # noqa: F821
+        except Exception:
+            pass
+    # Treat empty string or the special sentinel "auto" as auto-detect
+    if not val or val.lower() == "auto":
+        try:
+            import serial.tools.list_ports  # pyserial — available in PlatformIO Python env
+            ports = list(serial.tools.list_ports.comports())
+            if ports:
+                return ports[0].device
+        except Exception:
+            pass
+        return ""
+    return val
+
+_env_serial = _resolve_serial_port()
+SERIAL_PORT = _env_serial if _env_serial else ""
 
 _env_base    = os.getenv("LED_CLOCK_TEST_BASE_URL", "").strip()
 DEVICE_BASE  = _env_base.rstrip("/") if _env_base else "http://ledclock.local"
@@ -103,6 +130,9 @@ def _serial_reader(port: str, baud: int) -> None:
 
 def _start_serial_capture(port: str, baud: int) -> bool:
     """Start the serial capture thread.  Returns True on success, False if unavailable."""
+    if not port:
+        _log("TEST", "WARNING: serial capture disabled (no serial port configured or detected)")
+        return False
     try:
         import serial
         probe = serial.Serial(port, baud, timeout=0.5)
@@ -246,6 +276,28 @@ def _phase_a(base: str, bin_path: str) -> "tuple[bool, str]":
 
     try:
         result = _post_multipart_bin(base, bin_path, timeout=UPLOAD_TIMEOUT_SEC)
+    except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
+        # These errors (WinError 10054 / ECONNRESET, EPIPE, ECONNABORTED) occur when
+        # the device restarts after a successful OTA, tearing down all TCP connections
+        # before the HTTP 200 response is read by the client.  Treat this as a
+        # potential success: wait for the device to come back and report PASS if it
+        # does — the OTA was applied even though the response ACK was lost.
+        _log("TEST", f"  connection torn down ({exc}) — device likely restarted after OTA;"
+                     " waiting for recovery...")
+        try:
+            _wait_device_ready(base, BOOT_WAIT_SEC)
+        except RuntimeError:
+            return False, (
+                f"upload connection torn down and device did not recover within "
+                f"{BOOT_WAIT_SEC}s: {exc}"
+            )
+        elapsed = time.time() - t_start
+        try:
+            status = _get_json(f"{base}/api/status", timeout=6.0)
+            fw = status.get("fw_version_base", "?")
+        except Exception:
+            fw = "?"
+        return True, f"PASS (connection-reset-then-recovered in {elapsed:.1f}s, fw={fw})"
     except Exception as exc:
         return False, f"upload request failed: {exc}"
 
@@ -286,6 +338,24 @@ def _phase_b(base: str) -> "tuple[bool, str]":
             _log("TEST", f"  resolved GitHub release URL: {fw_url}")
         except RuntimeError as exc:
             return False, f"could not resolve firmware URL: {exc}"
+
+    # Ensure the device is up and its WiFi has reconnected before triggering the
+    # URL-based OTA (which requires WiFi).  This matters especially when Phase A
+    # just caused a reboot — the device needs a few extra seconds to re-associate.
+    _log("TEST", "  waiting for device WiFi before from-url trigger...")
+    wifi_deadline = time.time() + BOOT_WAIT_SEC
+    wifi_ready = False
+    while time.time() < wifi_deadline:
+        try:
+            st = _get_json(f"{base}/api/status", timeout=4.0)
+            if st.get("wifi_connected"):
+                wifi_ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(2.0)
+    if not wifi_ready:
+        return False, f"device WiFi not connected within {BOOT_WAIT_SEC}s; cannot trigger URL OTA"
 
     _drain_serial_queue()
     t_start = time.time()
@@ -345,7 +415,7 @@ def _run_ota_stress(target, source, env) -> None:
         _log("TEST", f"Log file : {log_path}")
         _log("TEST", f"Device   : {DEVICE_BASE}")
         _log("TEST", f"Firmware : {bin_path} ({os.path.getsize(bin_path):,} bytes)")
-        _log("TEST", f"Serial   : {SERIAL_PORT}")
+        _log("TEST", f"Serial   : {SERIAL_PORT if SERIAL_PORT else '(none — serial capture disabled)'}")
 
         _start_serial_capture(SERIAL_PORT, SERIAL_BAUD)
 
