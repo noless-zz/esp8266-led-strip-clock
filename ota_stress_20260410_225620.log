@@ -1,0 +1,792 @@
+[TEST] OTA stress test started — 2 cycles
+[TEST] Log file : C:\Users\ADMIN\OneDrive\מסמכים\PlatformIO\Projects\esp8266-led-strip-clock\esp8266-led-strip-clock\ota_stress_20260410_225620.log
+[TEST] Device   : http://ledclock.local
+[TEST] Firmware : C:\Users\ADMIN\OneDrive\מסמכים\PlatformIO\Projects\esp8266-led-strip-clock\esp8266-led-strip-clock\.pio\build\ota_stress\firmware.bin (581,136 bytes)
+[TEST] Serial   : COM6
+[TEST] Waiting for device to be reachable before first cycle...
+[TEST] Device is up.
+[TEST] ===== Cycle 1/2 =====
+[TEST] Phase A: local file upload
+[TEST]   precheck OK: firmware.bin (581136 bytes)
+[SERIAL] [OTA] Upload start  file=firmware.bin  maxSize=1511424  heap=26208  frag=2
+[SERIAL] 
+[SERIAL] User exception (panic/abort/assert)
+[SERIAL] --------------- CUT HERE FOR EXCEPTION DECODER ---------------
+[SERIAL] 
+[SERIAL] Panic core_esp8266_main.cpp:191 __yield
+[SERIAL] 
+[SERIAL] >>>stack>>>
+[SERIAL] 
+[SERIAL] ctx: sys
+[SERIAL] sp: 3fffec70 end: 3fffffb0 offset: 0010
+[SERIAL] 3fffec80:  3fff4ecc 00000010 00000020 4021fd29  
+[SERIAL] 3fffec90:  3fff4ecc 00000010 3fff1b20 4021e07d  
+[SERIAL] 3fffeca0:  00000000 2c9f0300 4000050c 3fffc278  
+[SERIAL] 3fffecb0:  40103338 3fffc200 00000022 00000000  
+[SERIAL] 3fffecc0:  000005b4 000005b4 3fff1b20 4021e1b4  
+[SERIAL] 3fffecd0:  3fff55b4 0000052b 00000ad5 00001000  
+[SERIAL] 3fffece0:  3fffed64 3fff4ecc 3fffed0c 3fff45c0  
+[SERIAL] 3fffecf0:  000005b4 00000ad5 3fff1b20 40208431  
+[SERIAL] 3fffed00:  3fff4ffa 000005b4 00000375 3fff4ee4  
+[SERIAL] 3fffed10:  000c000f 80000000 3fff22b0 402370e4  
+[SERIAL] 3fffed20:  3fff55b4 00000000 00000061 00000030  
+[SERIAL] 3fffed30:  3ffe919d 00000000 00000020 3fff45c0  
+[SERIAL] 3fffed40:  3fff45ac 3fff4cb0 3fff4bcc 4021a668  
+[SERIAL] 3fffed50:  3fffed70 40105673 3ffef310 402371b8  
+[SERIAL] 3fffed60:  000005b4 3fff55b4 00000ad5 3fff4bcc  
+[SERIAL] 3fffed70:  40104c00 3fff1f68 3fff47f0 40238c64  
+[SERIAL] 3fffed80:  00000ad5 3fff55b4 000005b4 00000000  
+[SERIAL] 3fffed90:  3ffe919d 00000030 00000002 00040000  
+[SERIAL] 3fffeda0:  00002200 3fff23b0 00000020 000005b3  
+[SERIAL] 3fffedb0:  000005b4 3fff4ffa 3fff4bcc 402235bc  
+[SERIAL] 3fffedc0:  00000000 00000000 00000000 000005b3  
+[SERIAL] 3fffedd0:  000005b4 3fff4ffa 3fff4bcc 40218bd9  
+[SERIAL] 3fffede0:  40103338 3fffc200 00000022 40238cf2  
+[SERIAL] 3fffedf0:  4026b6bb 00000030 00000010 ffffffff  
+[SERIAL] 3fffee00:  000005b3 00000001 ae560418 3f790611  
+[SERIAL] 3fffee10:  3ffec45c 00008e88 00000000 3fff4fb4  
+[SERIAL] 3fffee20:  3fffee70 3fff4ae4 3fff47ec 40222160  
+[SERIAL] 3fffee30:  000005b4 3fff4ffa 3fff4ae4 3fff4bcc  
+[SERIAL] 3fffee40:  00000000 3ffec45c 00000001 7fffffff  
+[SERIAL] 3fffee50:  00000000 3ffebba5 3ffebba0 00000000  
+[SERIAL] 3fffee60:  3fff4fb4 3fff47ec 3fff4ae4 402221c0  
+[SERIAL] 3fffee70:  3fff48b8 3fff48ac 3fff370c 3fff1f68  
+[SERIAL] 3fffee80:  3fff21dc 3fff1f68 3fff4fb4 3fff2224  
+[SERIAL] 3fffee90:  3fff47ec 3fff2228 3fff2229 402339a1  
+[SERIAL] 3fffeea0:  3ffef5e0 00000006 00000000 3fffdab0  
+[SERIAL] 3fffeeb0:  00000010 00000000 3ffebbf8 00000030  
+[SERIAL] 3fffeec0:  00000000 00000532 3ffe86c8 3fff1f68  
+[SERIAL] 3fffeed0:  3fff21dc 3fff4fd2 3fff4fb4 40238a45  
+[SERIAL] 3fffeee0:  00000014 3fff1f68 00000000 402303c1  
+[SERIAL] 3fffeef0:  00000000 0000055e 3ffe86c8 40100ba2  
+[SERIAL] 3fffef00:  402687b8 3fff4ee4 3fff27d4 3fff3714  
+[SERIAL] 3fffef10:  3fff1f68 00000008 3fff4fb4 4022fa89  
+[SERIAL] 3fffef20:  3fffdc80 3fff27d4 3fff4ee4 4022f89c  
+[SERIAL] 3fffef30:  4026b989 3fff27d4 3fff4ee4 4026b99b  
+[SERIAL] 3fffef40:  3fff4fc4 3fff4fb4 00000000 3fffdcc0  
+[SERIAL] 3fffef50:  3ffebc40 00000000 3fff4ee4 4026cc77  
+[SERIAL] 3fffef60:  40000f49 3fffdab0 3fffdab0 40000f49  
+[SERIAL] 3fffef70:  40000e19 0008d999 bff00000 0000bfff  
+[SERIAL] 3fffef80:  00000005 aa55aa55 000000e2 4010578d  
+[SERIAL] 3fffef90:  40105793 bff00000 0000bfff 28280840  
+[SERIAL] 3fffefa0:  4010000d bff00000 0008d999 401000ab  
+[SERIAL] 3fffefb0:  4025cf3c 3fffef4c 4025ceed 3fffff48  
+[SERIAL] 3fffefc0:  3fffffd0 00000000 00000000 feefeffe  
+[SERIAL] 3fffefd0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3fffefe0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3fffeff0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff000:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff010:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff020:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff030:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff040:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff050:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff060:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff070:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff080:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff090:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff100:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff110:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff120:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff130:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff140:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff150:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff160:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff170:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff180:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff190:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff200:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff210:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff220:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff230:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff240:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff250:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff260:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff270:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff280:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff290:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff300:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff310:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff320:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff330:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff340:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff350:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff360:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff370:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff380:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff390:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff400:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff410:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff420:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff430:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff440:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff450:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff460:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff470:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff480:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff490:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff500:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff510:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff520:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff530:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff540:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff550:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff560:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff570:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff580:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff590:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff600:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff610:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff620:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff630:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff640:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff650:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff660:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff670:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffff680:  feefeffe feefeffe 3fffc228 40105f25  
+[SERIAL] 3ffff690:  4000050c feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6a0:  4000e28c 00000030 00000004 ffffffff  
+[SERIAL] 3ffff6b0:  4000d4f2 00000141 0000a000 00000010  
+[SERIAL] 3ffff6c0:  00000017 00000141 402822c4 0000141f  
+[SERIAL] 3ffff6d0:  00000000 3fffc6fc 3ffff8f3 a0000000  
+[SERIAL] 3ffff6e0:  00000141 f0000000 3ffff960 00000030  
+[SERIAL] 3ffff6f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff700:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff710:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff720:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff730:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff740:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff750:  00000005 00000000 0000000a 00000000  
+[SERIAL] 3ffff760:  00000005 00000000 0000000a 00000000  
+[SERIAL] 3ffff770:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff780:  00000000 a0000000 00000000 0000001c  
+[SERIAL] 3ffff790:  00005000 feefeffe 00005000 3ffe83c4  
+[SERIAL] 3ffff7a0:  00000000 00000000 3ffff910 4022bccc  
+[SERIAL] 3ffff7b0:  3ffffbb0 3ffff8a3 00000000 00000000  
+[SERIAL] 3ffff7c0:  feefeffe feefeffe 40226bb9 3ffe83c4  
+[SERIAL] 3ffff7d0:  00000037 3ffe83c4 4026953b 00000001  
+[SERIAL] 3ffff7e0:  ffffffff 00000000 3ffebcf1 00000008  
+[SERIAL] 3ffff7f0:  4026958a 3ffef310 3fff252c 00000001  
+[SERIAL] 3ffff800:  00000002 00000000 00000020 40100574  
+[SERIAL] 3ffff810:  00000005 00000005 00000002 401023f4  
+[SERIAL] 3ffff820:  3ffebba2 4026864b 3ffef310 3fff4cbc  
+[SERIAL] 3ffff830:  00000000 40251843 3fff0690 3fff252c  
+[SERIAL] 3ffff840:  00000000 00000002 00000000 3ffef310  
+[SERIAL] 3ffff850:  3fff4cfe 40105ccf 3fff2f74 3fff1f50  
+[SERIAL] 3ffff860:  3fff27d4 00000037 40226bb9 3ffe83c4  
+[SERIAL] 3ffff870:  00000037 4022f489 3fff2f74 3fff1f50  
+[SERIAL] 3ffff880:  4022bc08 3ffffbb0 00000037 00000000  
+[SERIAL] 3ffff890:  00000005 00000000 00000020 40100574  
+[SERIAL] 3ffff8a0:  3fff1f68 3fff4cbc 00000005 401023f4  
+[SERIAL] 3ffff8b0:  3ffebba5 4010568b 3ffef5e0 40100574  
+[SERIAL] 3ffff8c0:  40102f7f 3ffef5e0 3fffc228 40105f25  
+[SERIAL] 3ffff8d0:  ffffffca 072a9e7d 3ffefedc 4010315c  
+[SERIAL] 3ffff8e0:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffff8f0:  ffffffca 072a9e7d 3fffc228 40105f25  
+[SERIAL] 3ffff900:  4000050c 00000000 00000020 40100574  
+[SERIAL] 3ffff910:  4000d9b5 00000030 00000004 ffffffff  
+[SERIAL] 3ffff920:  4000d9b5 000000bf 0000a000 00000010  
+[SERIAL] 3ffff930:  00000018 000000b0 000077f0 0000000a  
+[SERIAL] 3ffff940:  00000000 00000000 3ffffb53 00000000  
+[SERIAL] 3ffff950:  000000bf e0000000 a0000000 00000030  
+[SERIAL] 3ffff960:  00000003 00000000 0000000a 00000000  
+[SERIAL] 3ffff970:  00000003 00000000 0000000a 00000000  
+[SERIAL] 3ffff980:  00000001 00000080 0000001f 40100574  
+[SERIAL] 3ffff990:  00000000 a0000000 00000000 0000001c  
+[SERIAL] 3ffff9a0:  00003000 2c9f0300 00003000 3ffe83c4  
+[SERIAL] 3ffff9b0:  00000000 00000000 3ffffb20 4022bccc  
+[SERIAL] 3ffff9c0:  3ffffdc0 3ffffab3 00000000 00000001  
+[SERIAL] 3ffff9d0:  00000002 00000000 40226bb9 3ffe83c4  
+[SERIAL] 3ffff9e0:  00000034 3ffe83c4 4026953b 00000001  
+[SERIAL] 3ffff9f0:  ffffffff 00000000 3ffebcf1 00000008  
+[SERIAL] 3ffffa00:  4026958a 3ffef270 3fff252c 00000001  
+[SERIAL] 3ffffa10:  00000002 00000000 00000020 40100574  
+[SERIAL] 3ffffa20:  00000005 00000005 00000002 401023f4  
+[SERIAL] 3ffffa30:  3ffebba2 4026864b 3ffef270 3fff4ae4  
+[SERIAL] 3ffffa40:  00000000 40251843 3fff0690 3fff252c  
+[SERIAL] 3ffffa50:  00000000 00000002 00000000 3ffef270  
+[SERIAL] 3ffffa60:  3fff4b26 40105ccf 3fff2f04 3fff1f50  
+[SERIAL] 3ffffa70:  3fff27d4 00000034 40226bb9 3ffe83c4  
+[SERIAL] 3ffffa80:  00000034 4022f489 3fff2f04 3fff1f50  
+[SERIAL] 3ffffa90:  4022bc08 3ffffdc0 00000034 00000000  
+[SERIAL] 3ffffaa0:  4000050c 3ffeb3d1 3fffc228 3fff1f68  
+[SERIAL] 3ffffab0:  3fff1f68 3fff4ae4 3fff4ae4 4022f6bb  
+[SERIAL] 3ffffac0:  3fff1fa0 3fff4ae4 00000000 4022fb16  
+[SERIAL] 3ffffad0:  3fff22bc 3ffe83c4 3ffffbc0 4022bccc  
+[SERIAL] 3ffffae0:  00000000 3ffe8e5c 00000001 3fff22bc  
+[SERIAL] 3ffffaf0:  3fff1f68 3fff1fa0 3fff22b0 402370e4  
+[SERIAL] 3ffffb00:  3ffe8e5c 3ffe83c4 3ffffbc0 4022bec9  
+[SERIAL] 3ffffb10:  3fff4ae4 00000034 00000000 00000000  
+[SERIAL] 3ffffb20:  00000034 00000048 00302073 3fff4ae4  
+[SERIAL] 3ffffb30:  3fff4ae4 3fff3150 3fff1f68 402371b8  
+[SERIAL] 3ffffb40:  40200000 00000030 0000001b 37373533  
+[SERIAL] 3ffffb50:  3fff4b34 3fff1f68 3fff3150 40238c64  
+[SERIAL] 3ffffb60:  0000003c 00000000 00000000 000000fd  
+[SERIAL] 3ffffb70:  00000014 3fff1f6c 000000ff 00000000  
+[SERIAL] 3ffffb80:  00000011 3fff23b0 0000000c 00000034  
+[SERIAL] 3ffffb90:  00000050 00000000 00000001 3fff4ae4  
+[SERIAL] 3ffffba0:  3fff3150 3fff4ae4 3fff314c 40238c96  
+[SERIAL] 3ffffbb0:  3fff1f68 00000000 00000000 40239c47  
+[SERIAL] 3ffffbc0:  3ffffcc8 00000008 000000f7 40235200  
+[SERIAL] 3ffffbd0:  3fff1f68 0000013f 4e495b5d 00000048  
+[SERIAL] 3ffffbe0:  3fff1f68 3fff1f6c 00001ec6 3fff4b48  
+[SERIAL] 3ffffbf0:  333d6761 74707520 0000005a 3fff3150  
+[SERIAL] 3ffffc00:  00001ec6 3fff4ae4 3fff314c 40235274  
+[SERIAL] 3ffffc10:  3ffffc50 00000000 00000000 40235318  
+[SERIAL] 3ffffc20:  00000001 4010484e 3ffffc50 00000000  
+[SERIAL] 3ffffc30:  00000000 3fff4ae4 3fff4a1c 4020f61f  
+[SERIAL] 3ffffc40:  00000005 00000000 00000020 40100574  
+[SERIAL] 3ffffc50:  3fff2d54 3ffe9354 00000005 401023f4  
+[SERIAL] 3ffffc60:  3ffebba5 4010568b 3ffef630 40201492  
+[SERIAL] 3ffffc70:  40102f7f 3ffef630 00000020 40100574  
+[SERIAL] 3ffffc80:  ffffffca d6323e4a 3ffefedc 4010315c  
+[SERIAL] 3ffffc90:  3ffec438 00000000 00000000 40105f25  
+[SERIAL] 3ffffca0:  ffffffca d6323e4a 40103616 00000100  
+[SERIAL] 3ffffcb0:  3ffec438 7fffffff 00000000 00000001  
+[SERIAL] 3ffffcc0:  00000001 00000080 0000001d 3ffe9c53  
+[SERIAL] 3ffffcd0:  3ffec438 00000001 000007ea d6323e4a  
+[SERIAL] 3ffffce0:  3ffec444 2c9f0300 4000050c 3fffc278  
+[SERIAL] 3ffffcf0:  40103338 3fffc200 00000022 00000030  
+[SERIAL] 3ffffd00:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffffd10:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffffd20:  00000000 00000000 3fffc228 40105f25  
+[SERIAL] 3ffffd30:  4000050c 00000030 3fffc228 40105f25  
+[SERIAL] 3ffffd40:  4000e254 00000030 0000001d ffffffff  
+[SERIAL] 3ffffd50:  40225c5c 000000ca 00000099 00000018  
+[SERIAL] 3ffffd60:  00000018 000000ca 00097004 00000000  
+[SERIAL] 3ffffd70:  2a300000 00000001 00000000 00000028  
+[SERIAL] 3ffffd80:  3fff4924 000000ca 0000253a 00000030  
+[SERIAL] 3ffffd90:  00000000 aaf38000 0000aaf3 00008000  
+[SERIAL] 3ffffda0:  0000a8c0 aaf38000 0000aaf3 00008000  
+[SERIAL] 3ffffdb0:  0000a8c0 34ecaaf3 00000018 0000003b  
+[SERIAL] 3ffffdc0:  3ffffdf0 00000000 000f4240 3ffe83c4  
+[SERIAL] 3ffffdd0:  870c75f3 00064f20 000f4240 3ffe83c4  
+[SERIAL] 3ffffde0:  3ffe8368 40282264 3ffe8368 4022b082  
+[SERIAL] 3ffffdf0:  000034ec 40225b55 3fff1298 3fff4924  
+[SERIAL] 3ffffe00:  000069d9 00000000 3ffe8368 40228b8c  
+[SERIAL] 3ffffe10:  0000000e 00000000 00000062 0000f424  
+[SERIAL] 3ffffe20:  00005049 3fff4924 3ffffed8 69d955e7  
+[SERIAL] 3ffffe30:  3ffffe80 40a78d36 00000003 3f060cb0  
+[SERIAL] 3ffffe40:  3f060a90 3e12fe1d b9aad43f 31cce000  
+[SERIAL] 3ffffe50:  324ce000 3c07a540 3fff4924 3807f332  
+[SERIAL] 3ffffe60:  3ffe8368 40282264 3fff4924 00000002  
+[SERIAL] 3ffffe70:  3ffe8677 00000016 0000000c 4022e0f5  
+[SERIAL] 3ffffe80:  3f060a90 324ce000 3ffffed8 69d955e7  
+[SERIAL] 3ffffe90:  41b00000 43690000 3ffe8677 3efffffd  
+[SERIAL] 3ffffea0:  69d955e7 00000000 40220b72 00000000  
+[SERIAL] 3ffffeb0:  54442d18 403921fb 40220b72 3ffe864c  
+[SERIAL] 3ffffec0:  3ffe8640 3ffe8634 3fff1740 69d955e7  
+[SERIAL] 3ffffed0:  00000000 3fff1290 3fff1298 40201970  
+[SERIAL] 3ffffee0:  0000003c 000000ff 00009fbe 40220bff  
+[SERIAL] 3ffffef0:  69d955e7 00000000 0000012b 3fff2a74  
+[SERIAL] 3fffff00:  00000000 3fff1290 3fff1298 40203518  
+[SERIAL] 3fffff10:  00000001 00000001 ffffffcc 40211961  
+[SERIAL] 3fffff20:  b007c10c 00000df9 00000034 40211abd  
+[SERIAL] 3fffff30:  40106069 4302a146 3fff1c44 00000000  
+[SERIAL] 3fffff40:  3fff0d70 3fff1c44 3ffe86c4 3fff1c44  
+[SERIAL] 3fffff50:  0036e4d4 00000064 4021fc58 3fffefb0  
+[SERIAL] 3fffff60:  3fff1c44 0036e4d4 00000064 4021fdad  
+[SERIAL] 3fffff70:  0036e4d4 00000064 0036e4d4 4021fe23  
+[SERIAL] 3fffff80:  00000000 0036e4d4 2f1a9fbe 3f789556  
+[SERIAL] 3fffff90:  00000003 00007820 feefefcf 3fff1c6c  
+[SERIAL] 3fffffa0:  3fffdad0 0036e4d4 00000064 40220454  
+[SERIAL] <<<stack<<<
+[SERIAL] 
+[SERIAL] --------------- CUT HERE FOR EXCEPTION DECODER ---------------
+[SERIAL] 
+[SERIAL]  ets Jan  8 2013,rst cause:4, boot mode:(3,7)
+[SERIAL] 
+[SERIAL] wdt reset
+[SERIAL] load 0x4010f000, len 3424, room 16 
+[SERIAL] tail 0
+[SERIAL] chksum 0x2e
+[SERIAL] load 0x3fff20b8, len 40, room 8 
+[SERIAL] tail 0
+[SERIAL] chksum 0x2b
+[SERIAL] csum 0x2b
+[SERIAL] v0008d9a0
+[SERIAL] ~ld
+[SERIAL] ����o�s��o<�l�l`c��|{�l�o��g� $`��s�l�l��
+[SERIAL] 
+[SERIAL] 
+[SERIAL]   ESP8266 LED Strip Clock v2.72.0+26 (Apr 10 2026 00:15:48)
+[SERIAL]   60-LED NeoPixel Clock with NTP Sync
+[SERIAL] 
+[SERIAL] 
+[SERIAL] [BOOT] #53  last_uptime=0h59m37s  reason=4 (Software/System restart)
+[SERIAL] [LED] 60-LED RGB clock initialized
+[SERIAL] [BTN] Button 1 on pin 14, Button 2 on pin 12
+[SERIAL] [EEPROM] Loaded WiFi: Lab
+[SERIAL] [EEPROM] Pass len=0 chars: []
+[SERIAL] [WiFi] Starting AP+STA mode...
+[SERIAL] [WiFi] AP: LED-Clock-26A1CF
+[SERIAL] [WiFi] AP IP: 192.168.4.1
+[SERIAL] [DNS] Captive portal ready
+[SERIAL] [OTA] Ready
+[SERIAL] [Web] Server started @ http://192.168.4.1
+[SERIAL] [READY] Access point: LED-Clock-26A1CF
+[SERIAL] [READY] Open browser: http://192.168.4.1
+[SERIAL] 
+[SERIAL] [WiFi] Scan done (2 networks). Connecting to: Lab
+[SERIAL] [WiFi] --- Connection attempt ---
+[SERIAL] [WiFi] Target SSID : Lab
+[SERIAL] [WiFi] Pass (0): []
+[SERIAL] [WiFi] Current status: 0
+[SERIAL] [WiFi] MAC address  : 3C:71:BF:26:A1:CF
+[SERIAL] [WiFi] Found in scan cache: ch=3  rssi=-49  enc=7
+[SERIAL] [WiFi] Restarting AP on ch=3 to match router
+[SERIAL] [WiFi] Calling WiFi.begin("Lab", <pass>)
+[SERIAL] [WiFi] WiFi.begin() called, polling for result...
+[SERIAL] [2593][INF][WiFi] Connecting  ssid=Lab  ch=3  heap=30920
+[SERIAL] [WiFi] Status changed: IDLE -> DISCONNECTED  (+21ms)
+[SERIAL] [mDNS] Available at http://ledclock.local
+[SERIAL] [WiFi] Status changed: DISCONNECTED -> CONNECTED  (+2386ms)
+[SERIAL] [WiFi] Connected! IP: 192.168.137.204
+[SERIAL] [4964][INF][WiFi] Connected  ssid=Lab  ip=192.168.137.204  rssi=-57  ch=3  heap=30328
+[SERIAL] [4972][INF][BOOT] fw=2.72.0+26 git:e52fde5 built:Apr 10 2026 00:15:48  reason=4 (Software/System restart)
+[SERIAL] [4981][INF][TZ] Auto-detect start  heap=29768
+[SERIAL] [4985][INF][TZ] Trying ip-api (heap=29712)
+[SERIAL] [5153][INF][TZ] ip-api connected
+[SERIAL] [5456][INF][TZ] OK  tz=Asia/Jerusalem  offset=10800  via=ip-api  heap=29864
+[SERIAL] [NTP] Syncing with pool.ntp.org
+[SERIAL] [NTP] Time synced
+[SERIAL] [5558][INF][NTP] Synced  epoch=1775850990  tz=Asia/Jerusalem  heap=30536
+[SERIAL] [WiFi] checkWiFi: status IDLE -> CONNECTED
+[TEST]   connection torn down ([WinError 10054] An existing connection was forcibly closed by the remote host) — device likely restarted after OTA; waiting for recovery...
+[TEST] Phase A: PASS — PASS (connection-reset-then-recovered in 11.4s, fw=2.72.0+26)
+[TEST] Phase B: GitHub URL OTA
+[TEST]   resolved GitHub release URL: https://github.com/noless-zz/esp8266-led-strip-clock/releases/download/v2.68.0/firmware.bin
+[TEST]   waiting for device WiFi before from-url trigger...
+[TEST] Phase B: FAIL — from-url trigger request failed: <urlopen error timed out>
+[TEST] ===== Cycle 2/2 =====
+[TEST] Phase A: local file upload
+[TEST]   precheck OK: firmware.bin (581136 bytes)
+[SERIAL] [OTA] Upload start  file=firmware.bin  maxSize=1511424  heap=26160  frag=2
+[SERIAL] 
+[SERIAL] User exception (panic/abort/assert)
+[SERIAL] --------------- CUT HERE FOR EXCEPTION DECODER ---------------
+[SERIAL] 
+[SERIAL] Panic core_esp8266_main.cpp:191 __yield
+[SERIAL] 
+[SERIAL] >>>stack>>>
+[SERIAL] 
+[SERIAL] ctx: sys
+[SERIAL] sp: 3fffec70 end: 3fffffb0 offset: 0010
+[SERIAL] 3fffec80:  3fff4d14 00000010 00000020 4021fd29  
+[SERIAL] 3fffec90:  3fff4d14 00000010 3fff1b20 4021e07d  
+[SERIAL] 3fffeca0:  00000000 00080000 3fff2f90 3fff1f50  
+[SERIAL] 3fffecb0:  00002ae0 00000000 3ffe86c8 00000000  
+[SERIAL] 3fffecc0:  000005b4 000005b4 3fff1b20 4021e1b4  
+[SERIAL] 3fffecd0:  3fff55bc 0000052b 00000ad5 00001000  
+[SERIAL] 3fffece0:  3fffed64 3fff4d14 3fffed0c 3fff45c0  
+[SERIAL] 3fffecf0:  000005b4 00000ad5 3fff1b20 40208431  
+[SERIAL] 3fffed00:  00000001 000005b3 00000b68 3fff4eec  
+[SERIAL] 3fffed10:  000c000f 80000000 00000000 3fff4bcc  
+[SERIAL] 3fffed20:  3fff55bc 00000000 00000000 00000030  
+[SERIAL] 3fffed30:  3ffe919d 3fff4c00 3fff4c00 3fff45c0  
+[SERIAL] 3fffed40:  3fff45ac 3fff4cb0 3fff4bcc 4021a668  
+[SERIAL] 3fffed50:  3fffed70 40104580 00040000 402371b8  
+[SERIAL] 3fffed60:  000005b4 3fff55bc 00000ad5 3fff4bcc  
+[SERIAL] 3fffed70:  40105000 3ffefd68 3ffef338 00040000  
+[SERIAL] 3fffed80:  00000ad5 3fff55bc 000005b4 00000000  
+[SERIAL] 3fffed90:  3ffe919d 3fffc200 00000022 00000000  
+[SERIAL] 3fffeda0:  40239d75 00000030 00000010 000005b3  
+[SERIAL] 3fffedb0:  000005b4 3fff5002 3fff4bcc 402235bc  
+[SERIAL] 3fffedc0:  00000000 3fff2244 00000000 000005b3  
+[SERIAL] 3fffedd0:  000005b4 3fff5002 3fff4bcc 40218bd9  
+[SERIAL] 3fffede0:  3fff4fee 3fff2242 3fff2240 00000030  
+[SERIAL] 3fffedf0:  40250ad9 3ffedda4 3fffeef6 00000006  
+[SERIAL] 3fffee00:  000005b3 00000001 3eb851eb 00849288  
+[SERIAL] 3fffee10:  000105ea 0000fff8 00000002 3fff4fbc  
+[SERIAL] 3fffee20:  3fffee70 3fff4ae4 3fff485c 40222160  
+[SERIAL] 3fffee30:  000005b4 3fff5002 3fff4ae4 3fff4bcc  
+[SERIAL] 3fffee40:  00000000 3fffc200 00000022 402345c8  
+[SERIAL] 3fffee50:  40260000 00000030 0000001c 00000000  
+[SERIAL] 3fffee60:  3fff4fbc 3fff485c 3fff4ae4 402221c0  
+[SERIAL] 3fffee70:  3fff2dc8 3fff2dbc 3ffeffc0 3fff1f68  
+[SERIAL] 3fffee80:  3fff21dc 3fff1f68 3fff4fbc 3fff2224  
+[SERIAL] 3fffee90:  3fff485c 3fff2228 3fff2229 402339a1  
+[SERIAL] 3fffeea0:  ffffffff 3fffc6fc 00000000 3fffdab0  
+[SERIAL] 3fffeeb0:  00000010 00000000 3ffebc98 00000030  
+[SERIAL] 3fffeec0:  00000000 00000527 3ffe86c8 3fff1f68  
+[SERIAL] 3fffeed0:  3fff21dc 3fff4fda 3fff4fbc 40238a45  
+[SERIAL] 3fffeee0:  00000014 3fff1f68 00000000 402303c1  
+[SERIAL] 3fffeef0:  00000000 0000055f 3ffe86c8 40100ba2  
+[SERIAL] 3fffef00:  402687b8 3fff4eec 3fff27d4 3fff371c  
+[SERIAL] 3fffef10:  3fff1f68 00000008 3fff4fbc 4022fa89  
+[SERIAL] 3fffef20:  3fffdc80 3fff27d4 3fff4eec 4022f89c  
+[SERIAL] 3fffef30:  4026b989 3fff27d4 3fff4eec 4026b99b  
+[SERIAL] 3fffef40:  3fff4fcc 3fff4fbc 3fffdab0 00000000  
+[SERIAL] 3fffef50:  402683e7 00000000 3fff4eec 4026cc77  
+[SERIAL] 3fffef60:  40000f49 3fffdab0 3fffdab0 40000f49  
+[SERIAL] 3fffef70:  40000e19 0008d999 bff00000 0000bfff  
+[SERIAL] 3fffef80:  00000005 aa55aa55 000000e2 4010578d  
+[SERIAL] 3fffef90:  40105793 bff00000 0000bfff 28280840  
+[SERIAL] 3fffefa0:  4010000d bff00000 0008d999 401000ab  
+[SERIAL] 3fffefb0:  4025cf3c 3fffef4c 4025ceed 3fffff48  
+[SERIAL] 3fffefc0:  3fffffd0 00000000 00000000 feefeffe  
+[SERIAL] 3fffefd0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3fffefe0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3fffeff0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff000:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff010:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff020:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff030:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff040:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff050:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff060:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff070:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff080:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff090:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff0f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff100:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff110:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff120:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff130:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff140:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff150:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff160:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff170:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff180:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff190:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff1f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff200:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff210:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff220:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff230:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff240:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff250:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff260:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff270:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff280:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff290:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff2f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff300:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff310:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff320:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff330:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff340:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff350:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff360:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff370:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff380:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff390:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff3f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff400:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff410:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff420:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff430:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff440:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff450:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff460:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff470:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff480:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff490:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff4f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff500:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff510:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff520:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff530:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff540:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff550:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff560:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff570:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff580:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff590:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff5f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff600:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff610:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff620:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff630:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff640:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff650:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff660:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff670:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff680:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff690:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6a0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6b0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6c0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6d0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6e0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff6f0:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff700:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff710:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff720:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff730:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff740:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff750:  00000005 00000000 0000000a 00000000  
+[SERIAL] 3ffff760:  00000005 00000000 0000000a 00000000  
+[SERIAL] 3ffff770:  feefeffe feefeffe feefeffe feefeffe  
+[SERIAL] 3ffff780:  00000000 a0000000 00000000 0000001c  
+[SERIAL] 3ffff790:  00005000 feefeffe 00005000 3ffe83c4  
+[SERIAL] 3ffff7a0:  00000000 00000000 3ffff910 4022bccc  
+[SERIAL] 3ffff7b0:  3ffffbb0 3ffff8a3 00000000 00000000  
+[SERIAL] 3ffff7c0:  feefeffe feefeffe 40226bb9 3ffe83c4  
+[SERIAL] 3ffff7d0:  00000037 3ffe83c4 4026953b 00000001  
+[SERIAL] 3ffff7e0:  ffffffff 00000000 3ffebcf1 00000008  
+[SERIAL] 3ffff7f0:  4026958a 3ffef310 3fff252c 00000001  
+[SERIAL] 3ffff800:  00000002 00000000 00000020 40100574  
+[SERIAL] 3ffff810:  00000005 00000005 00000002 401023f4  
+[SERIAL] 3ffff820:  3ffebba2 4026864b 3ffef310 3fff4bcc  
+[SERIAL] 3ffff830:  00000000 40251843 3fff0690 3fff252c  
+[SERIAL] 3ffff840:  00000000 00000002 00000000 3ffef310  
+[SERIAL] 3ffff850:  3fff4c0e 40105ccf 3fff2f74 3fff1f50  
+[SERIAL] 3ffff860:  3fff27d4 00000037 40226bb9 3ffe83c4  
+[SERIAL] 3ffff870:  00000037 4022f489 3fff2f74 3fff1f50  
+[SERIAL] 3ffff880:  4022bc08 3ffffbb0 00000037 00000000  
+[SERIAL] 3ffff890:  00000000 00000002 00000000 3fff1f68  
+[SERIAL] 3ffff8a0:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffff8b0:  3fff1fa0 3fff4bcc 3fffc228 40105f25  
+[SERIAL] 3ffff8c0:  4000050c 3ffe83c4 3ffff9b0 4022bccc  
+[SERIAL] 3ffff8d0:  40100f27 00000030 00000010 ffffffff  
+[SERIAL] 3ffff8e0:  40100f24 3fff494c 00000004 00000ee4  
+[SERIAL] 3ffff8f0:  3fff23f0 3fff4948 000000cf 3fff4958  
+[SERIAL] 3ffff900:  000000ae 3ffffa33 000000ff 00000020  
+[SERIAL] 3ffff910:  40212e54 3fff3974 00000001 00000030  
+[SERIAL] 3ffff920:  3fff4bcc 3fff3150 3fff1f68 402371b8  
+[SERIAL] 3ffff930:  3fff0000 3fff1fa0 373731b0 35333835  
+[SERIAL] 3ffff940:  3fff4c1c 3fff1f68 3fff3150 40238c64  
+[SERIAL] 3ffff950:  3fff4d14 0000003b 00000000 00000000  
+[SERIAL] 3ffff960:  00000014 3fff1f6c 000000ff 00000000  
+[SERIAL] 3ffff970:  00000011 3fff23b0 0000000c 00000037  
+[SERIAL] 3ffff980:  00000051 00000000 00000001 3fff4bcc  
+[SERIAL] 3ffff990:  3fff3150 3fff4bcc 3fff314c 40238c96  
+[SERIAL] 3ffff9a0:  3fff1f68 00000000 00000000 40239c47  
+[SERIAL] 3ffff9b0:  3ffff9f2 00000000 0000001f 00000001  
+[SERIAL] 3ffff9c0:  3fff3974 40212e54 00000020 40100f24  
+[SERIAL] 3ffff9d0:  3ffffa35 00000002 0000000c 4021f9af  
+[SERIAL] 3ffff9e0:  3fff3974 00000034 3ffffe80 3ffffe80  
+[SERIAL] 3ffff9f0:  00000000 00000015 00000001 40213a4d  
+[SERIAL] 3ffffa00:  3fff3974 3ffffe80 3ffffa20 40213d52  
+[SERIAL] 3ffffa10:  3fff3974 00000000 3fff18d4 40213f0c  
+[SERIAL] 3ffffa20:  72615f08 6e697564 745f046f 6c057063  
+[SERIAL] 3ffffa30:  6c61636f 00000000 00000000 00000000  
+[SERIAL] 3ffffa40:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffa50:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffa60:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffa70:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffa80:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffa90:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffaa0:  3ffffae1 00000000 00000000 00000000  
+[SERIAL] 3ffffab0:  00000000 00000000 00000000 3ffffe80  
+[SERIAL] 3ffffac0:  00000000 00000001 00000001 40213a4d  
+[SERIAL] 3ffffad0:  3fff3974 00000000 3ffffe80 40213a7a  
+[SERIAL] 3ffffae0:  00000055 00000000 00000000 00000000  
+[SERIAL] 3ffffaf0:  00000000 00000000 00000000 40213b92  
+[SERIAL] 3ffffb00:  00000000 00000000 3fff18d4 40213ec1  
+[SERIAL] 3ffffb10:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb20:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb30:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb40:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb50:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb60:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffb70:  00000000 00000000 00000000 0000007f  
+[SERIAL] 3ffffb80:  00000004 00000080 00000020 40100f24  
+[SERIAL] 3ffffb90:  3ffffbd1 00000000 0000005a 402303c1  
+[SERIAL] 3ffffba0:  00000000 00000000 00000000 3ffffe80  
+[SERIAL] 3ffffbb0:  00000000 00000001 4026953b 00000001  
+[SERIAL] 3ffffbc0:  ffffffff 00000000 3ffebcf1 00000008  
+[SERIAL] 3ffffbd0:  4026958a 3ffef298 3fff252c 00000001  
+[SERIAL] 3ffffbe0:  00000002 00000000 00000020 40100574  
+[SERIAL] 3ffffbf0:  00000005 00000005 00000002 401023f4  
+[SERIAL] 3ffffc00:  3ffebba2 4026864b 3ffef298 3fff4cbc  
+[SERIAL] 3ffffc10:  00000000 40251843 3fff0690 3fff252c  
+[SERIAL] 3ffffc20:  00000000 00000002 00000001 3ffef298  
+[SERIAL] 3ffffc30:  3fff4cfe 40105ccf 3fff2f20 3fff1f50  
+[SERIAL] 3ffffc40:  3fff27d4 00000000 00000000 00000000  
+[SERIAL] 3ffffc50:  00000000 4022f489 3fff2f20 3fff1f50  
+[SERIAL] 3ffffc60:  00000000 00000000 00000000 00000000  
+[SERIAL] 3ffffc70:  00000000 00000000 00000000 3fff1f68  
+[SERIAL] 3ffffc80:  3fff1f68 3fff4cbc 3fff4cbc 4022f6bb  
+[SERIAL] 3ffffc90:  3fff1fa0 3fff4cbc 00000000 4022fb16  
+[SERIAL] 3ffffca0:  3ffffcd0 00000000 00000000 00000000  
+[SERIAL] 3ffffcb0:  00000000 00000000 00000000 3fff4cbc  
+[SERIAL] 3ffffcc0:  3fff4cbc 3ffffe1c 3fff1f68 402371e9  
+[SERIAL] 3ffffcd0:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffffce0:  3fff4d0c 3fff1f68 3fffc228 40105f25  
+[SERIAL] 3ffffcf0:  00000000 00000000 00000020 40100574  
+[SERIAL] 3ffffd00:  00000000 00000000 00000000 401023f4  
+[SERIAL] 3ffffd10:  00000000 00000000 0000001f 40100574  
+[SERIAL] 3ffffd20:  00000001 4010484e 3fffc228 40105f25  
+[SERIAL] 3ffffd30:  4000050c 00000000 00000020 40100574  
+[SERIAL] 3ffffd40:  69d95606 00000000 00015180 00000000  
+[SERIAL] 3ffffd50:  69d95606 00000000 00015180 00000000  
+[SERIAL] 3ffffd60:  69d95606 00000000 00015180 00000000  
+[SERIAL] 3ffffd70:  00000000 8c71a07d 382d7365 3ffffe80  
+[SERIAL] 3ffffd80:  00000000 3ffe8677 00000002 00000030  
+[SERIAL] 3ffffd90:  00000000 ab030000 0000ab03 00000000  
+[SERIAL] 3ffffda0:  0000a8c0 ab030000 0000ab03 00000000  
+[SERIAL] 3ffffdb0:  0000a8c0 34ecab03 00000010 ffffffff  
+[SERIAL] 3ffffdc0:  3ffffdf0 00000000 000f4240 3ffe83c4  
+[SERIAL] 3ffffdd0:  88e3a0fb 00064f20 000f4240 3ffe83c4  
+[SERIAL] 3ffffde0:  3ffe8368 40282264 3ffe8368 4022b082  
+[SERIAL] 3ffffdf0:  000034ec 40225b55 3fff1298 3fff47ec  
+[SERIAL] 3ffffe00:  000069d9 00000000 3ffe8368 40228b8c  
+[SERIAL] 3ffffe10:  0000000e 00000000 00000000 0000f424  
+[SERIAL] 3ffffe20:  00005049 3fff47ec 3ffffed8 69d95606  
+[SERIAL] 3ffffe30:  3ffffe80 40a78d36 00000003 3f060cb0  
+[SERIAL] 3ffffe40:  3f060a90 3e12fe1d b9aad43f 31cce000  
+[SERIAL] 3ffffe50:  324ce000 3c07a540 3fff47ec 3807f332  
+[SERIAL] 3ffffe60:  3ffe8368 40282264 3fff47ec 00000002  
+[SERIAL] 3ffffe70:  3ffe8677 00000016 0000000c 4022e0f5  
+[SERIAL] 3ffffe80:  3f060a90 324ce000 3ffffed8 69d95606  
+[SERIAL] 3ffffe90:  41b00000 43690000 3ffe8677 3efffffd  
+[SERIAL] 3ffffea0:  69d95606 00000000 40220b72 00000000  
+[SERIAL] 3ffffeb0:  54442d18 403921fb 40220b72 3ffe864c  
+[SERIAL] 3ffffec0:  3ffe8640 3ffe8634 3fff1740 69d95606  
+[SERIAL] 3ffffed0:  00000000 3fff1290 3fff1298 40201970  
+[SERIAL] 3ffffee0:  0000003c 000000ff 00009168 40220bff  
+[SERIAL] 3ffffef0:  69d95606 00000000 0000012b 3fff2a74  
+[SERIAL] 3fffff00:  00000000 3fff1290 3fff1298 40203518  
+[SERIAL] 3fffff10:  3fff18d4 00000001 3fffff40 40211961  
+[SERIAL] 3fffff20:  00000001 00000001 3fff47ec 40211abd  
+[SERIAL] 3fffff30:  40106069 008c1f39 3fff1c44 00000000  
+[SERIAL] 3fffff40:  3fff0d70 3fff1c44 3ffe86c4 3fff1c44  
+[SERIAL] 3fffff50:  0000728b 00000064 4021fc58 3fffefb0  
+[SERIAL] 3fffff60:  3fff1c44 0000728b 00000064 4021fdad  
+[SERIAL] 3fffff70:  0000728b 00000064 0000728b 4021fe23  
+[SERIAL] 3fffff80:  00000000 0000728b 3c28f5c2 008470fd  
+[SERIAL] 3fffff90:  3c004643 a126bf71 feefefcf 3fff1c6c  
+[SERIAL] 3fffffa0:  3fffdad0 0000728b 00000064 40220454  
+[SERIAL] <<<stack<<<
+[SERIAL] 
+[SERIAL] --------------- CUT HERE FOR EXCEPTION DECODER ---------------
+[SERIAL] 
+[SERIAL]  ets Jan  8 2013,rst cause:4, boot mode:(3,7)
+[SERIAL] 
+[SERIAL] wdt reset
+[SERIAL] load 0x4010f000, len 3424, room 16 
+[SERIAL] tail 0
+[SERIAL] chksum 0x2e
+[SERIAL] load 0x3fff20b8, len 40, room 8 
+[SERIAL] tail 0
+[SERIAL] chksum 0x2b
+[SERIAL] csum 0x2b
+[SERIAL] v0008d9a0
+[SERIAL] ~ld
+[SERIAL] ����o�s��o<�d�l c��|s�l�'��o� d`��s�$�l��
+[SERIAL] 
+[SERIAL] 
+[SERIAL]   ESP8266 LED Strip Clock v2.72.0+26 (Apr 10 2026 00:15:48)
+[SERIAL]   60-LED NeoPixel Clock with NTP Sync
+[SERIAL] 
+[SERIAL] 
+[SERIAL] [BOOT] #54  last_uptime=0h00m00s  reason=4 (Software/System restart)
+[SERIAL] [LED] 60-LED RGB clock initialized
+[SERIAL] [BTN] Button 1 on pin 14, Button 2 on pin 12
+[SERIAL] [EEPROM] Loaded WiFi: Lab
+[SERIAL] [EEPROM] Pass len=0 chars: []
+[SERIAL] [WiFi] Starting AP+STA mode...
+[SERIAL] [WiFi] AP: LED-Clock-26A1CF
+[SERIAL] [WiFi] AP IP: 192.168.4.1
+[SERIAL] [DNS] Captive portal ready
+[SERIAL] [OTA] Ready
+[SERIAL] [Web] Server started @ http://192.168.4.1
+[SERIAL] [READY] Access point: LED-Clock-26A1CF
+[SERIAL] [READY] Open browser: http://192.168.4.1
+[SERIAL] 
+[SERIAL] [WiFi] Scan done (3 networks). Connecting to: Lab
+[SERIAL] [WiFi] --- Connection attempt ---
+[SERIAL] [WiFi] Target SSID : Lab
+[SERIAL] [WiFi] Pass (0): []
+[SERIAL] [WiFi] Current status: 0
+[SERIAL] [WiFi] MAC address  : 3C:71:BF:26:A1:CF
+[SERIAL] [WiFi] Found in scan cache: ch=3  rssi=-47  enc=7
+[SERIAL] [WiFi] Restarting AP on ch=3 to match router
+[SERIAL] [WiFi] Calling WiFi.begin("Lab", <pass>)
+[SERIAL] [WiFi] WiFi.begin() called, polling for result...
+[SERIAL] [2596][INF][WiFi] Connecting  ssid=Lab  ch=3  heap=30920
+[SERIAL] [WiFi] Status changed: IDLE -> DISCONNECTED  (+21ms)
+[SERIAL] [mDNS] Available at http://ledclock.local
+[SERIAL] [WiFi] Status changed: DISCONNECTED -> CONNECTED  (+2386ms)
+[SERIAL] [WiFi] Connected! IP: 192.168.137.204
+[SERIAL] [4968][INF][WiFi] Connected  ssid=Lab  ip=192.168.137.204  rssi=-54  ch=3  heap=30328
+[SERIAL] [4975][INF][BOOT] fw=2.72.0+26 git:e52fde5 built:Apr 10 2026 00:15:48  reason=4 (Software/System restart)
+[SERIAL] [4984][INF][TZ] Auto-detect start  heap=29768
+[SERIAL] [4988][INF][TZ] Trying ip-api (heap=29712)
+[SERIAL] [5169][INF][TZ] ip-api connected
+[SERIAL] [5480][INF][TZ] OK  tz=Asia/Jerusalem  offset=10800  via=ip-api  heap=29984
+[SERIAL] [NTP] Syncing with pool.ntp.org
+[SERIAL] [NTP] Time synced
+[SERIAL] [5583][INF][NTP] Synced  epoch=1775851021  tz=Asia/Jerusalem  heap=30536
+[SERIAL] [WiFi] checkWiFi: status IDLE -> CONNECTED
+[TEST]   connection torn down ([WinError 10054] An existing connection was forcibly closed by the remote host) — device likely restarted after OTA; waiting for recovery...
+[TEST] Phase A: PASS — PASS (connection-reset-then-recovered in 11.4s, fw=2.72.0+26)
+[TEST] Phase B: GitHub URL OTA
+[TEST]   resolved GitHub release URL: https://github.com/noless-zz/esp8266-led-strip-clock/releases/download/v2.68.0/firmware.bin
+[TEST]   waiting for device WiFi before from-url trigger...
+[TEST] Phase B: FAIL — from-url trigger request failed: <urlopen error timed out>
+[TEST] ===== SUMMARY =====
+[TEST] Cycle  1: A=PASS  B=FAIL
+[TEST]           B detail: from-url trigger request failed: <urlopen error timed out>
+[TEST] Cycle  2: A=PASS  B=FAIL
+[TEST]           B detail: from-url trigger request failed: <urlopen error timed out>
+[TEST] 2 of 2 cycles had failures.
+[TEST] Full log saved to: C:\Users\ADMIN\OneDrive\מסמכים\PlatformIO\Projects\esp8266-led-strip-clock\esp8266-led-strip-clock\ota_stress_20260410_225620.log
