@@ -287,7 +287,9 @@ void loop() {
   // Deferred restart after multipart OTA upload (set by /api/update response handler).
   // The response handler runs in sys context where delay() is unsafe; the restart is
   // deferred here so the HTTP response has time to be sent before the device reboots.
-  if (otaRestartPending && millis() - otaRestartAt > 500) {
+  // 2 000 ms gives lwIP enough round-trips to deliver and ACK the response on slow or
+  // congested WiFi links before ESP.restart() tears down all TCP connections with RST.
+  if (otaRestartPending && millis() - otaRestartAt > 2000) {
     otaRestartPending = false;
     Serial.println("[OTA] Restarting after upload...");
     ESP.restart();

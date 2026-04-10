@@ -474,6 +474,28 @@ void setupWebServer() {
     req->send(200, "application/json", json);
   });
   
+  // API: OTA from URL (device downloads firmware from GitHub and flashes itself).
+  // Registered BEFORE /api/update so that ESPAsyncWebServer matches this exact
+  // path first and does not accidentally route it into the upload handler below.
+  server.on("/api/update/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!req->hasParam("url")) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing url parameter\"}");
+      return;
+    }
+    if (!wifiConnected) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Device not connected to WiFi\"}");
+      return;
+    }
+    String url = req->getParam("url")->value();
+    if (url.length() == 0) {
+      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Empty URL\"}");
+      return;
+    }
+    otaFromUrl = url;
+    otaFromUrlAt = millis();
+    req->send(202, "application/json", "{\"ok\":true,\"status\":\"downloading\"}");
+  });
+
   // API: OTA Upload
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest *req) {
@@ -523,6 +545,12 @@ void setupWebServer() {
         otaStatus.lastFileName  = filename;
         otaStatus.startedAt     = millis();
         otaStatus.finishedAt    = 0;
+
+        // If a previous upload was interrupted before Update.end() was called
+        // (e.g., client dropped the connection mid-stream), the Updater library
+        // remains in a "started" state and a subsequent Update.begin() will fail.
+        // Abort it unconditionally; end(false) is a no-op when not running.
+        Update.end(false);
 
         // runAsync(false) = synchronous writes — we feed WDT manually between chunks.
         // runAsync(true) defers writes to a queue but Update.process() must be called
@@ -588,26 +616,6 @@ void setupWebServer() {
       }
     }
   );
-  
-  // API: OTA from URL (device downloads firmware from GitHub and flashes itself)
-  server.on("/api/update/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!req->hasParam("url")) {
-      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing url parameter\"}");
-      return;
-    }
-    if (!wifiConnected) {
-      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Device not connected to WiFi\"}");
-      return;
-    }
-    String url = req->getParam("url")->value();
-    if (url.length() == 0) {
-      req->send(400, "application/json", "{\"ok\":false,\"error\":\"Empty URL\"}");
-      return;
-    }
-    otaFromUrl = url;
-    otaFromUrlAt = millis();
-    req->send(202, "application/json", "{\"ok\":true,\"status\":\"downloading\"}");
-  });
 
   // Catchall
   server.onNotFound([](AsyncWebServerRequest *req) {
