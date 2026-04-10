@@ -295,7 +295,7 @@ void loop() {
     ESP.restart();
   }
 
-  // Dispatch server-side OTA-from-URL (queued by /api/update/from-url handler)
+  // Dispatch server-side OTA-from-URL (queued by /api/ota/from-url handler)
   if (otaFromUrl.length() > 0 && millis() - otaFromUrlAt > 500) {
     String url = otaFromUrl;
     otaFromUrl = "";

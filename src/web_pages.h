@@ -380,7 +380,7 @@ function _dfWaitReboot(btn,st,oldVer){
 }
 function _dfFlashFromDevice(btn,st,oldVer,url){
   st.textContent='Sending download request to device\u2026';
-  fetch('/api/update/from-url?url='+encodeURIComponent(url),{method:'POST'})
+  fetch('/api/ota/from-url?url='+encodeURIComponent(url),{method:'POST'})
   .then(function(r){return r.json();}).then(function(d){
     if(!d.ok){st.textContent='\u2717 '+(d.error||'Unknown error');st.style.color='#c33';btn.disabled=false;return;}
     st.textContent='Device is downloading firmware from GitHub\u2026';

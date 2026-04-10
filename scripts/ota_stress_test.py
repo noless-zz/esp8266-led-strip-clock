@@ -5,7 +5,7 @@ Registers the custom target 'ota_stress_test'.  Run with:
 
 Each cycle exercises two OTA paths:
   Phase A — local file upload  : POST /api/update  (multipart/form-data)
-  Phase B — GitHub URL download : POST /api/update/from-url?url=<url>
+  Phase B — GitHub URL download : POST /api/ota/from-url?url=<url>
 
 Environment variable overrides (all optional):
     OTA_STRESS_SERIAL       serial port to monitor      (default: auto-detect first
@@ -57,7 +57,11 @@ def _resolve_serial_port() -> str:
             import serial.tools.list_ports  # pyserial — available in PlatformIO Python env
             ports = list(serial.tools.list_ports.comports())
             if ports:
-                return ports[0].device
+                # Prefer USB serial adapters (CH340, CP210x, FTDI, ...) over built-in
+                # system ports such as COM1 (ACPI/PNP0501).  USB ports always have a
+                # non-None vendor ID; system ports do not.
+                usb_ports = [p for p in ports if p.vid is not None]
+                return (usb_ports[0] if usb_ports else ports[0]).device
         except Exception:
             pass
         return ""
@@ -326,7 +330,7 @@ def _phase_a(base: str, bin_path: str) -> "tuple[bool, str]":
 
 
 def _phase_b(base: str) -> "tuple[bool, str]":
-    """Phase B: URL OTA via POST /api/update/from-url.  Returns (ok, message)."""
+    """Phase B: URL OTA via POST /api/ota/from-url.  Returns (ok, message)."""
     _log("TEST", "Phase B: GitHub URL OTA")
 
     if FW_URL_OVERRIDE:
@@ -360,7 +364,7 @@ def _phase_b(base: str) -> "tuple[bool, str]":
     _drain_serial_queue()
     t_start = time.time()
 
-    trigger_url = f"{base}/api/update/from-url?url={_url_quote(fw_url, safe='')}"
+    trigger_url = f"{base}/api/ota/from-url?url={_url_quote(fw_url, safe='')}"
     try:
         resp = _post_json(trigger_url, timeout=15.0)
     except Exception as exc:
