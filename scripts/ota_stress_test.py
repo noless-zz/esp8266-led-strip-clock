@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 # ============================================================================
 # Configurable constants — change NUM_CYCLES here for more / fewer test cycles
 # ============================================================================
-NUM_CYCLES = 2
+NUM_CYCLES = 10
 
 SERIAL_BAUD        = 115200
 BOOT_WAIT_SEC      = 45      # max seconds to wait for device after a reboot
