@@ -499,11 +499,11 @@ void setupWebServer() {
   });
   
   // API: OTA from URL (device downloads firmware from GitHub and flashes itself).
+  // Accepts both GET and POST so the browser JS (fetch POST) and the stress-test
+  // script (GET) both work without body-parsing issues on empty POST bodies.
   // Uses /api/ota/from-url (not a sub-path of /api/update) to avoid
-  // ESPAsyncWebServer's prefix-match behaviour, where /api/update would
-  // otherwise also match /api/update/from-url and dispatch to the binary-upload
-  // handler instead, returning 500.
-  server.on("/api/ota/from-url", HTTP_POST, [](AsyncWebServerRequest *req) {
+  // ESPAsyncWebServer's prefix-match behaviour.
+  server.on("/api/ota/from-url", HTTP_ANY, [](AsyncWebServerRequest *req) {
     if (!req->hasParam("url")) {
       req->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing url parameter\"}");
       return;
@@ -524,45 +524,41 @@ void setupWebServer() {
 
   // API: OTA Upload
   server.on("/api/update", HTTP_POST,
+    // ── Response handler (SYS context) ──────────────────────────────────────
+    // With the async ring-buffer design the actual flash write and Update.end()
+    // happen in loop() (CONT context), AFTER this response handler has already
+    // fired.  We therefore store the request pointer and let loop() send the
+    // HTTP response once Update.end() has returned.
+    // If begin() failed (active=false, beginOk=false) we send an immediate 500.
     [](AsyncWebServerRequest *req) {
-      // Response handler runs in sys context — use ets_printf() (not Serial.printf() or
-      // DLOGI/DLOGE) so we never call yield() and trigger a panic.
-      //
-      // Read outcome from otaStatus, which the upload callback populated BEFORE calling
-      // Update.end().  Do NOT call Update.progress() here: Update.end() calls _reset()
-      // internally, which zeroes _progress, so Update.progress() always returns 0 by the
-      // time this response handler runs (causing a false-negative "written=0" failure).
-      uint32_t written = otaStatus.writtenBytes;
-      bool success = otaStatus.lastSuccess && (written > 0);
-      if (success) {
-        ets_printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
-      } else {
-        ets_printf("[OTA] RESPONSE fail  written=%u  errStr=%s  heap=%u\n",
+      if (!otaAsync.active && !otaAsync.beginOk) {
+        // begin() failed — send error now (no flash writes were attempted).
+        uint32_t written = otaStatus.writtenBytes;
+        ets_printf("[OTA] RESPONSE (begin failed)  written=%u  errStr=%s  heap=%u\n",
                       written, otaStatus.lastErrorText.c_str(), ESP.getFreeHeap());
-      }
-      req->send(success ? 200 : 500, "application/json",
-        String("{\"ok\":") + (success ? "true" : "false") +
-        ",\"written\":" + String(written) +
-        ",\"error\":\"" + (success ? "" : otaStatus.lastErrorText) + "\"}");
-      if (success) {
-        // delay() is not safe in sys context (calls yield() → panic).
-        // Schedule the restart from loop() context instead; 500 ms gives lwIP time to
-        // flush the HTTP response before the device reboots.
-        otaRestartPending = true;
-        otaRestartAt = millis();
+        req->send(500, "application/json",
+          String(F("{\"ok\":false,\"written\":")) + written +
+          F(",\"error\":\"") + otaStatus.lastErrorText + F("\"}"));
+      } else {
+        // Normal path: loop() will call req->send() after Update.end() returns.
+        otaAsync.req = req;
       }
     },
+    // ── Upload callback (SYS context) ────────────────────────────────────────
+    // MUST NOT call Update.write() or Update.end() here: both eventually call
+    // _writeBuffer() → yield() → panic ("__yield ctx: sys").
+    // All flash writes are deferred to loop() via the otaAsync ring buffer.
     [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-      // Static state shared across all chunks of a single upload.  The ESP8266 is
-      // single-threaded and ESPAsyncWebServer never overlaps upload callbacks, so
-      // these are safe without additional synchronisation.
-      static bool     _beginOk      = false;  // true after Update.begin() succeeds
-      static uint32_t _lastLoggedKB = 0;      // tracks last logged progress band
-
       if (index == 0) {
-        // Reset per-upload state at the start of every new upload.
-        _beginOk      = false;
-        _lastLoggedKB = 0;
+        // ── First chunk: initialise per-upload state ─────────────────────────
+        otaAsync.head        = 0;
+        otaAsync.tail        = 0;
+        otaAsync.active      = false;
+        otaAsync.beginOk     = false;
+        otaAsync.uploadFinal = false;
+        otaAsync.overflowed  = false;
+        otaAsync.req         = nullptr;
+
         otaStatus.inProgress    = false;
         otaStatus.lastSuccess   = false;
         otaStatus.writtenBytes  = 0;
@@ -572,23 +568,20 @@ void setupWebServer() {
         otaStatus.startedAt     = millis();
         otaStatus.finishedAt    = 0;
 
-        // If a previous upload was interrupted before Update.end() was called
-        // (e.g., client dropped the connection mid-stream), the Updater library
-        // remains in a "started" state and a subsequent Update.begin() will fail.
-        // Abort it unconditionally; end(false) is a no-op when not running.
+        // Allocate ring buffer (only held during the upload, freed by loop()).
+        if (otaAsync.data == nullptr) {
+          otaAsync.data = (uint8_t*)malloc(OtaAsyncBuf::CAP);
+        }
+        if (otaAsync.data == nullptr) {
+          ets_printf("[OTA] FAILED to allocate ring buffer (%u B)  heap=%u\n",
+                       (unsigned)OtaAsyncBuf::CAP, ESP.getFreeHeap());
+          return;  // beginOk stays false → response handler sends 500
+        }
+
+        // Abort any leftover Updater state from a previously interrupted upload.
         Update.end(false);
 
-        // runAsync(false) = synchronous writes — we feed WDT manually between chunks.
-        // runAsync(true) defers writes to a queue but Update.process() must be called
-        // from loop() to drain it; without that, all writes flush at once in one huge
-        // blocking burst and the lwIP stack crashes (Soft WDT, exccause=4, 0x4024xxxx).
         uint32_t maxSize = getMaxUpdateSize();
-        // All logging in this callback MUST use ets_printf(), not Serial.printf().
-        // Serial.printf() uses a 256-byte TX ring buffer; when the buffer is full it calls
-        // yield() to wait for the UART — but yield() in sys context causes a panic:
-        // "Panic core_esp8266_main.cpp:191 __yield  ctx: sys".
-        // ets_printf() writes directly to the UART FIFO (busy-wait, never yields) and is
-        // safe in any context.
         ets_printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
                       filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
         if (!Update.begin(maxSize, U_FLASH)) {
@@ -596,52 +589,43 @@ void setupWebServer() {
           otaStatus.lastErrorText = Update.getErrorString();
           ets_printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
                         (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
-          return;
+          return;  // beginOk stays false
         }
-        _beginOk = true;
-        otaStatus.inProgress = true;
+        otaAsync.beginOk      = true;
+        otaAsync.active       = true;
+        otaStatus.inProgress  = true;
       }
 
-      // Skip write processing when begin() failed — Update was never started so
-      // Update.write() would silently return 0 and pollute the log.
-      if (!_beginOk) return;
+      if (!otaAsync.beginOk) return;  // begin() failed — discard remaining chunks
 
-      // wdtFeed() is safe in any context; yield() is not — do not add it here.
-      ESP.wdtFeed();
-      size_t written = Update.write(data, len);
-      if (written != len) {
-        ets_printf("[OTA] write FAILED  offset=%u  want=%u  got=%u  %s\n",
-                      (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString().c_str());
+      // ── Copy chunk into ring buffer (no flash writes, no yield) ────────────
+      uint32_t avail = OtaAsyncBuf::CAP - (otaAsync.head - otaAsync.tail);
+      if (avail < (uint32_t)len) {
+        ets_printf("[OTA] RING BUFFER OVERFLOW  avail=%u  len=%u\n",
+                     (unsigned)avail, (unsigned)len);
+        otaAsync.overflowed = true;
+        return;
       }
+      uint32_t headMod = otaAsync.head & (OtaAsyncBuf::CAP - 1);
+      uint32_t chunk1  = min((uint32_t)len, OtaAsyncBuf::CAP - headMod);
+      memcpy(otaAsync.data + headMod, data, chunk1);
+      if (chunk1 < (uint32_t)len) {
+        memcpy(otaAsync.data, data + chunk1, len - chunk1);
+      }
+      otaAsync.head += len;  // single 32-bit store — atomic on Xtensa
 
-      // Print progress every ~64 KB
-      uint32_t nowKB = (index + len) / 65536;
+      // Print receive progress every ~64 KB (safe: ets_printf never yields).
+      static uint32_t _lastLoggedKB = 0;
+      uint32_t nowKB = (uint32_t)((index + len) / 65536);
+      if (index == 0) _lastLoggedKB = 0;
       if (nowKB != _lastLoggedKB) {
         _lastLoggedKB = nowKB;
-        ets_printf("[OTA] progress  %u KB  heap=%u  frag=%u\n",
-                      (index + len) / 1024, ESP.getFreeHeap(), ESP.getHeapFragmentation());
+        ets_printf("[OTA] received %u KB  heap=%u\n",
+                     (unsigned)((index + len) / 1024), ESP.getFreeHeap());
       }
 
       if (final) {
-        _lastLoggedKB = 0;
-        _beginOk = false;
-        otaStatus.inProgress = false;
-        // Save progress BEFORE Update.end(): end() calls _reset() which zeroes _progress,
-        // so Update.progress() would return 0 if read after end() returns.
-        otaStatus.writtenBytes = Update.progress();
-        if (Update.end(true)) {
-          otaStatus.lastSuccess  = true;
-          otaStatus.finishedAt   = millis();
-          ets_printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
-                        otaStatus.writtenBytes, ESP.getFreeHeap());
-        } else {
-          otaStatus.lastSuccess   = false;
-          otaStatus.lastErrorCode = Update.getError();
-          otaStatus.lastErrorText = Update.getErrorString();
-          ets_printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
-                        (unsigned)Update.getError(), Update.getErrorString().c_str(),
-                        otaStatus.writtenBytes, ESP.getFreeHeap());
-        }
+        otaAsync.uploadFinal = true;  // loop() will call Update.end()
       }
     }
   );

@@ -72,6 +72,22 @@ extern unsigned long otaFromUrlAt;
 extern bool otaRestartPending;
 extern unsigned long otaRestartAt;
 
+// Async OTA ring-buffer — prevents Update.write() / Update.end() from running
+// in SYS context (where yield() is illegal and causes a panic).  The upload
+// callback (SYS) copies raw firmware bytes here; loop() (CONT) drains them.
+struct OtaAsyncBuf {
+  static const uint32_t CAP = 8192;  // power-of-2; must fit ≥1 TCP window (≈5744 B)
+  uint8_t*          data          = nullptr; // malloc'd at upload start, freed after
+  volatile uint32_t head          = 0;       // write cursor — only SYS increments
+  volatile uint32_t tail          = 0;       // read cursor  — only CONT increments
+  volatile bool     active        = false;   // true while an upload is in flight
+  volatile bool     beginOk       = false;   // true after Update.begin() succeeds
+  volatile bool     uploadFinal   = false;   // set when the last chunk has arrived
+  volatile bool     overflowed    = false;   // set on ring-buffer full → abort
+  AsyncWebServerRequest* req      = nullptr; // stored by response handler; used by loop()
+};
+extern OtaAsyncBuf otaAsync;
+
 // ============================================================================
 // Debug globals
 // ============================================================================

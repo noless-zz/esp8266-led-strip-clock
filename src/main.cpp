@@ -14,6 +14,7 @@
 #include "web_server.h"
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
+#include <Updater.h>
 
 // ============================================================================
 // String constant definitions
@@ -81,6 +82,7 @@ String otaFromUrl = "";
 unsigned long otaFromUrlAt = 0;
 bool otaRestartPending = false;
 unsigned long otaRestartAt = 0;
+OtaAsyncBuf otaAsync;
 
 // Debug globals
 bool debugRemoteEnabled = false;
@@ -280,6 +282,88 @@ void loop() {
               ESP.getFreeHeap(), ESP.getHeapFragmentation(),
               millis() / 1000, (int)displayMode, ntpSynced ? 1 : 0,
               wifiConnected ? WiFi.RSSI() : 0);
+      }
+    }
+  }
+
+  // ── Async OTA upload drain ───────────────────────────────────────────────
+  // The upload callback (SYS context) copies raw firmware bytes into a ring
+  // buffer so that Update.write() / Update.end() — both of which call yield()
+  // internally — are never executed in SYS context (panic: __yield ctx: sys).
+  // Here (CONT context) yield() is legal, so flash writes are safe.
+  if (otaAsync.active) {
+    if (otaAsync.overflowed) {
+      // Ring-buffer overflow: abort flash write and send HTTP 500.
+      Update.end(false);
+      otaAsync.active = false;
+      if (otaAsync.req) {
+        otaAsync.req->send(500, "application/json",
+                           F("{\"ok\":false,\"written\":0,\"error\":\"Upload buffer overflow\"}"));
+        otaAsync.req = nullptr;
+      }
+      if (otaAsync.data) { free(otaAsync.data); otaAsync.data = nullptr; }
+    } else {
+      // Drain available bytes from the ring buffer into the Updater.
+      uint32_t pending = otaAsync.head - otaAsync.tail;  // always ≥ 0 (unsigned)
+      if (pending > 0) {
+        uint32_t tailMod = otaAsync.tail & (OtaAsyncBuf::CAP - 1);
+        // Contiguous bytes up to the end of the ring-buffer array.
+        uint32_t chunk1 = min(pending, OtaAsyncBuf::CAP - tailMod);
+        size_t   w1     = Update.write(otaAsync.data + tailMod, (size_t)chunk1);
+        otaAsync.tail += w1;
+        // If the ring wrapped, also write the second contiguous segment.
+        if (w1 == chunk1 && chunk1 < pending) {
+          uint32_t chunk2 = pending - chunk1;
+          size_t   w2     = Update.write(otaAsync.data, (size_t)chunk2);
+          otaAsync.tail += w2;
+        }
+        otaStatus.writtenBytes = Update.progress();
+        if (Update.hasError()) {
+          ets_printf("[OTA] write error in loop: %s\n", Update.getErrorString().c_str());
+          otaAsync.active = false;
+          if (otaAsync.req) {
+            otaAsync.req->send(500, "application/json",
+              (String(F("{\"ok\":false,\"written\":")) + otaStatus.writtenBytes +
+               F(",\"error\":\"") + Update.getErrorString() + F("\"}")));
+            otaAsync.req = nullptr;
+          }
+          Update.end(false);
+          if (otaAsync.data) { free(otaAsync.data); otaAsync.data = nullptr; }
+        }
+      }
+      // Ring buffer fully drained and final flag set → finalize flash write.
+      if (otaAsync.uploadFinal && (otaAsync.head - otaAsync.tail) == 0
+          && !Update.hasError()) {
+        otaAsync.active       = false;
+        otaStatus.writtenBytes = Update.progress();
+        if (Update.end(true)) {
+          otaStatus.lastSuccess = true;
+          otaStatus.finishedAt  = millis();
+          ets_printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
+                     otaStatus.writtenBytes, ESP.getFreeHeap());
+          if (otaAsync.req) {
+            otaAsync.req->send(200, "application/json",
+              (String(F("{\"ok\":true,\"written\":")) + otaStatus.writtenBytes +
+               F(",\"error\":\"\"}")));
+            otaAsync.req = nullptr;
+          }
+          otaRestartPending = true;
+          otaRestartAt      = millis();
+        } else {
+          otaStatus.lastSuccess   = false;
+          otaStatus.lastErrorCode = Update.getError();
+          otaStatus.lastErrorText = Update.getErrorString();
+          ets_printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
+                     (unsigned)Update.getError(), Update.getErrorString().c_str(),
+                     otaStatus.writtenBytes, ESP.getFreeHeap());
+          if (otaAsync.req) {
+            otaAsync.req->send(500, "application/json",
+              (String(F("{\"ok\":false,\"written\":")) + otaStatus.writtenBytes +
+               F(",\"error\":\"") + Update.getErrorString() + F("\"}")));
+            otaAsync.req = nullptr;
+          }
+        }
+        if (otaAsync.data) { free(otaAsync.data); otaAsync.data = nullptr; }
       }
     }
   }
