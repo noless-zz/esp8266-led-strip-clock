@@ -247,7 +247,7 @@ void loop() {
   // Trigger NTP sync after WiFi connects (skip during OTA or when heap is low)
   bool ntpSynced = (time(nullptr) > 86400);
   unsigned long ntpInterval = ntpSynced ? 3600000UL : 20000UL;
-  bool otaActive = otaStatus.inProgress;
+  bool otaActive = otaStatus.inProgress || otaAsync.active;
   bool heapOk = (ESP.getFreeHeap() >= 22000);
   if (!otaActive && heapOk && wifiConnected && millis() - lastNtpSync > ntpInterval) {
     syncTimeNTP();
@@ -288,10 +288,39 @@ void loop() {
 
   // ── Async OTA upload drain ───────────────────────────────────────────────
   // The upload callback (SYS context) copies raw firmware bytes into a ring
-  // buffer so that Update.write() / Update.end() — both of which call yield()
-  // internally — are never executed in SYS context (panic: __yield ctx: sys).
-  // Here (CONT context) yield() is legal, so flash writes are safe.
+  // buffer so that Update.begin() / Update.write() / Update.end() — all of
+  // which call yield() internally — are never executed in SYS context
+  // (panic: __yield ctx: sys).  Here (CONT context) yield() is legal.
   if (otaAsync.active) {
+    // ── Deferred Update.begin() — must run in CONT context ──────────────────
+    // Update.begin() erases a flash sector in ESP8266 Arduino core 3.x and
+    // internally calls yield() for watchdog feeding, which panics in SYS context.
+    if (otaAsync.beginNeeded) {
+      otaAsync.beginNeeded = false;
+      // Abort any leftover Updater state from a previously interrupted upload.
+      Update.end(false);
+      if (!Update.begin(otaAsync.maxSize, U_FLASH)) {
+        otaStatus.lastErrorCode = Update.getError();
+        otaStatus.lastErrorText = Update.getErrorString();
+        ets_printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
+                      (unsigned)Update.getError(), Update.getErrorString().c_str(),
+                      ESP.getFreeHeap());
+        otaAsync.active = false;
+        if (otaAsync.req) {
+          otaAsync.req->send(500, "application/json",
+            String(F("{\"ok\":false,\"written\":0,\"error\":\"")) +
+            otaStatus.lastErrorText + F("\"}"));
+          otaAsync.req = nullptr;
+        }
+        if (otaAsync.data) { free(otaAsync.data); otaAsync.data = nullptr; }
+      } else {
+        otaAsync.beginOk     = true;
+        otaStatus.inProgress = true;
+      }
+    }
+
+    // ── Drain ring buffer into Updater (only when begin() has succeeded) ────
+    if (otaAsync.active) {
     if (otaAsync.overflowed) {
       // Ring-buffer overflow: abort flash write and send HTTP 500.
       Update.end(false);
@@ -365,6 +394,7 @@ void loop() {
         }
         if (otaAsync.data) { free(otaAsync.data); otaAsync.data = nullptr; }
       }
+    }
     }
   }
 
