@@ -10,6 +10,21 @@
 #include <EEPROM.h>
 #include <time.h>
 
+// All AsyncWebServer handlers (request, upload, response) run in SYS context —
+// the ESP8266 cooperative scheduler's cont_yield() frame.  In SYS context,
+// calling yield() (or delay(), or any function that calls them) causes
+// "Panic core_esp8266_main.cpp:191 __yield  ctx: sys".
+//
+// Serial.printf() uses a 256-byte TX ring buffer; when the ring buffer is full it
+// calls yield() to wait for the UART to drain.  The buffer can fill up when the
+// periodic debug heartbeat prints large DLOGI messages (BOOT + HB ≈ 220 bytes)
+// right before an upload callback fires.
+//
+// ets_printf() is an ESP8266 ROM function that writes directly to the UART FIFO,
+// busy-waiting (not yielding) if the 128-byte HW FIFO is full.  It is safe in any
+// context and is used for all logging inside SYS-context callbacks.
+extern "C" int ets_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+
 void setupWebServer() {
   // Main page - just clock & status
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) { 
@@ -227,7 +242,10 @@ void setupWebServer() {
     }
     if (changed) saveDebugConfig();
     if (req->hasParam("test")) {
-      DLOGI("TEST", "Debug test from web UI  heap=%u  uptime=%lus", ESP.getFreeHeap(), millis()/1000);
+      // DLOGI is unsafe in sys context: UDP endPacket() may call yield() → panic.
+      // Use ets_printf() for Serial-only output; UDP delivery is skipped here.
+      ets_printf("[%lu][INF][TEST] Debug test from web UI  heap=%u  uptime=%lus\n",
+                 millis(), ESP.getFreeHeap(), millis() / 1000);
     }
     String json = String("{\"enabled\":") + (debugRemoteEnabled ? "true" : "false") +
                   ",\"ip\":\"" + debugServerIp + "\",\"port\":" + debugServerPort + "}";
@@ -420,13 +438,17 @@ void setupWebServer() {
         tz.autoDetected = true;
         tzDiag.status = "running";
         tzDiag.message = "auto mode requested";
-        detectTimezone();
+        // detectTimezone() uses delay()/DLOGI internally → calls yield() → panic in sys context.
+        // Reset the check timer so loop() triggers detection on the next iteration instead.
+        lastTzCheck = 0;
         req->send(200, "text/plain", "Auto-detecting...");
       } else if (req->hasParam("offset")) {
         tz.utcOffset = (int32_t)(atof(req->getParam("offset")->value().c_str()) * 3600);
         tz.autoDetected = false;
         tz.name = "Manual";
-        syncTimeNTP();
+        // syncTimeNTP() uses delay() internally → calls yield() → panic in sys context.
+        // Reset the NTP timer so loop() re-syncs with the new UTC offset on the next iteration.
+        lastNtpSync = 0;
         req->send(200, "text/plain", "Manual timezone set");
       } else {
         req->send(400, "text/plain", "Missing offset param");
@@ -438,7 +460,9 @@ void setupWebServer() {
   
   // API: NTP Sync
   server.on("/api/ntp", HTTP_GET, [](AsyncWebServerRequest *req) {
-    syncTimeNTP();
+    // syncTimeNTP() uses delay() internally → calls yield() → panic in sys context.
+    // Reset the NTP timer so loop() triggers a sync on the next iteration instead.
+    lastNtpSync = 0;
     req->send(200, "text/plain", "Syncing...");
   });
   
@@ -501,8 +525,8 @@ void setupWebServer() {
   // API: OTA Upload
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest *req) {
-      // Response handler also runs in sys context — DLOGI/DLOGE send UDP which calls yield() → panic.
-      // Use Serial only here; the loop() heartbeat will pick up OTA completion for UDP logging.
+      // Response handler runs in sys context — use ets_printf() (not Serial.printf() or
+      // DLOGI/DLOGE) so we never call yield() and trigger a panic.
       //
       // Read outcome from otaStatus, which the upload callback populated BEFORE calling
       // Update.end().  Do NOT call Update.progress() here: Update.end() calls _reset()
@@ -511,9 +535,9 @@ void setupWebServer() {
       uint32_t written = otaStatus.writtenBytes;
       bool success = otaStatus.lastSuccess && (written > 0);
       if (success) {
-        Serial.printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
+        ets_printf("[OTA] RESPONSE ok  written=%u  heap=%u\n", written, ESP.getFreeHeap());
       } else {
-        Serial.printf("[OTA] RESPONSE fail  written=%u  errStr=%s  heap=%u\n",
+        ets_printf("[OTA] RESPONSE fail  written=%u  errStr=%s  heap=%u\n",
                       written, otaStatus.lastErrorText.c_str(), ESP.getFreeHeap());
       }
       req->send(success ? 200 : 500, "application/json",
@@ -559,15 +583,18 @@ void setupWebServer() {
         // from loop() to drain it; without that, all writes flush at once in one huge
         // blocking burst and the lwIP stack crashes (Soft WDT, exccause=4, 0x4024xxxx).
         uint32_t maxSize = getMaxUpdateSize();
-        // All logging in this callback MUST use Serial only.
-        // DLOGI/DLOGE send UDP packets which call yield() internally — illegal in sys context
-        // and causes "Panic core_esp8266_main.cpp:191 __yield  ctx: sys".
-        Serial.printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
+        // All logging in this callback MUST use ets_printf(), not Serial.printf().
+        // Serial.printf() uses a 256-byte TX ring buffer; when the buffer is full it calls
+        // yield() to wait for the UART — but yield() in sys context causes a panic:
+        // "Panic core_esp8266_main.cpp:191 __yield  ctx: sys".
+        // ets_printf() writes directly to the UART FIFO (busy-wait, never yields) and is
+        // safe in any context.
+        ets_printf("[OTA] Upload start  file=%s  maxSize=%u  heap=%u  frag=%u\n",
                       filename.c_str(), maxSize, ESP.getFreeHeap(), ESP.getHeapFragmentation());
         if (!Update.begin(maxSize, U_FLASH)) {
           otaStatus.lastErrorCode = Update.getError();
           otaStatus.lastErrorText = Update.getErrorString();
-          Serial.printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
+          ets_printf("[OTA] begin FAILED  err=%u  %s  heap=%u\n",
                         (unsigned)Update.getError(), Update.getErrorString().c_str(), ESP.getFreeHeap());
           return;
         }
@@ -583,7 +610,7 @@ void setupWebServer() {
       ESP.wdtFeed();
       size_t written = Update.write(data, len);
       if (written != len) {
-        Serial.printf("[OTA] write FAILED  offset=%u  want=%u  got=%u  %s\n",
+        ets_printf("[OTA] write FAILED  offset=%u  want=%u  got=%u  %s\n",
                       (unsigned)index, (unsigned)len, (unsigned)written, Update.getErrorString().c_str());
       }
 
@@ -591,7 +618,7 @@ void setupWebServer() {
       uint32_t nowKB = (index + len) / 65536;
       if (nowKB != _lastLoggedKB) {
         _lastLoggedKB = nowKB;
-        Serial.printf("[OTA] progress  %u KB  heap=%u  frag=%u\n",
+        ets_printf("[OTA] progress  %u KB  heap=%u  frag=%u\n",
                       (index + len) / 1024, ESP.getFreeHeap(), ESP.getHeapFragmentation());
       }
 
@@ -605,13 +632,13 @@ void setupWebServer() {
         if (Update.end(true)) {
           otaStatus.lastSuccess  = true;
           otaStatus.finishedAt   = millis();
-          Serial.printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
+          ets_printf("[OTA] end OK  totalWritten=%u  heap=%u\n",
                         otaStatus.writtenBytes, ESP.getFreeHeap());
         } else {
           otaStatus.lastSuccess   = false;
           otaStatus.lastErrorCode = Update.getError();
           otaStatus.lastErrorText = Update.getErrorString();
-          Serial.printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
+          ets_printf("[OTA] end FAILED  err=%u  %s  written=%u  heap=%u\n",
                         (unsigned)Update.getError(), Update.getErrorString().c_str(),
                         otaStatus.writtenBytes, ESP.getFreeHeap());
         }
