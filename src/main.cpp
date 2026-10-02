@@ -118,9 +118,9 @@ void setup() {
   Serial.println("\n");
   
   captureBootInfo();
-  setupLEDs();
   setupButtons();
   loadEEPROMSettings();
+  setupLEDs();
   setupWiFi();
   setupDNS();
   setupOTA();
