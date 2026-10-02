@@ -294,7 +294,13 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
   wifiConnect.startedAt = millis();
   wifiConnect.lastStatus = WiFi.status();
 
-  if (saveToEeprom) saveEEPROMSettings(ssid, pass);
+  if (saveToEeprom) {
+    saveEEPROMSettings(ssid, pass);
+    // Keep the in-memory credentials in sync, otherwise the auto-connect
+    // loop in main.cpp keeps retrying the previous network.
+    savedSsid = ssid;
+    savedPass = pass;
+  }
 
   // Check scan cache for channel
   int targetChannel = 0;
@@ -324,6 +330,7 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
   // Cancel any previous attempt before starting a new one (avoids leaking
   // connection state on each retry).
   WiFi.disconnect(false);
+  wifiConnected = false;
   yield();
 
   Serial.printf("[WiFi] Calling WiFi.begin(\"%s\", <pass>)\n", ssid.c_str());
