@@ -6,6 +6,8 @@ void syncTimeNTP();
 void detectTimezone();
 void checkWiFi();
 String getWifiScanJson();
+bool queueWiFiConnect(const String& ssid, const String& pass);
+void processPendingWiFiConnect();
 bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom = false);
 void updateWiFiConnect();
 void setupWiFi();

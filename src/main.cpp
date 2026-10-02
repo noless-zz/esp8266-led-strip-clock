@@ -137,6 +137,8 @@ void loop() {
 
   // Auto-connect: wait for a scan to finish so we have a channel hint, then connect.
   // Also handles retries after timeout (updateWiFiConnect triggers a rescan on timeout).
+  processPendingWiFiConnect();
+
   if (!wifiConnected && !wifiConnect.active && savedSsid.length() > 0) {
     int scanState = WiFi.scanComplete();
     static unsigned long scanWaitStart = 0;

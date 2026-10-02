@@ -131,7 +131,7 @@ void setupWebServer() {
       String ssid = req->getParam("ssid")->value();
       String pass = req->hasParam("pass") ? req->getParam("pass")->value() : "";
       
-      if (startWiFiConnect(ssid, pass, true)) {
+      if (queueWiFiConnect(ssid, pass)) {
         doc["connecting"] = true;
       } else {
         doc["connecting"] = false;
