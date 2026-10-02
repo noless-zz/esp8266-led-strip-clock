@@ -276,13 +276,15 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
     Serial.println("[WiFi] startWiFiConnect: already connecting, aborting");
     return false;
   }
+  if (ESP.getFreeHeap() < 8000) {
+    Serial.printf("[WiFi] Heap critically low (%u) -- restarting to avoid crash\n", ESP.getFreeHeap());
+    delay(100);
+    ESP.restart();
+  }
 
   Serial.println("[WiFi] --- Connection attempt ---");
   Serial.println("[WiFi] Target SSID : " + ssid);
-  // DEBUG: print password bytes to catch any EEPROM corruption
-  Serial.printf("[WiFi] Pass (%d): [", pass.length());
-  for (unsigned int i = 0; i < pass.length(); i++) Serial.printf("%c", pass[i]);
-  Serial.println("]");
+  Serial.printf("[WiFi] Pass length: %u\n", (unsigned)pass.length());
   Serial.println("[WiFi] Current status: " + String(WiFi.status()));
   Serial.println("[WiFi] MAC address  : " + WiFi.macAddress());
 
@@ -310,10 +312,19 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
 
   // ESP8266 AP+STA constraint: both AP and STA must share the same radio channel.
   // Restart AP on the router's channel before connecting, or STA stays DISCONNECTED.
-  if (targetChannel > 0 && targetChannel != (int)WiFi.channel()) {
+  // Only restart the AP when the channel actually changes: repeated softAP()
+  // restarts leak heap and eventually crash the device.
+  static int apChannel = 0;
+  if (targetChannel > 0 && targetChannel != apChannel && targetChannel != (int)WiFi.channel()) {
     Serial.printf("[WiFi] Restarting AP on ch=%d to match router\n", targetChannel);
     WiFi.softAP(AP_SSID, AP_PASS, targetChannel);
+    apChannel = targetChannel;
   }
+
+  // Cancel any previous attempt before starting a new one (avoids leaking
+  // connection state on each retry).
+  WiFi.disconnect(false);
+  yield();
 
   Serial.printf("[WiFi] Calling WiFi.begin(\"%s\", <pass>)\n", ssid.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
