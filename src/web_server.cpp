@@ -138,7 +138,8 @@ void setupWebServer() {
         doc["error"] = "Connection already in progress or invalid SSID";
       }
     } else {
-      updateWiFiConnect();
+      // Status poll only: loop() drives updateWiFiConnect(). It logs via
+      // Serial/UDP, which may yield() and panic in this sys context.
       if (wifiConnect.active) {
         doc["connecting"] = true;
       } else if (wifiConnect.success) {
