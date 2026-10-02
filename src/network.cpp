@@ -283,7 +283,7 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
     wifiConnect.active = false;
     wifiConnect.connecting = false;
   }
-  if (ESP.getFreeHeap() < 8000) {
+  if (ESP.getFreeHeap() < 4000) {
     Serial.printf("[WiFi] Heap critically low (%u) -- restarting to avoid crash\n", ESP.getFreeHeap());
     delay(100);
     ESP.restart();
@@ -437,6 +437,8 @@ const char* updateErrorToString(uint8_t error) {
 
 void setupWiFi() {
   Serial.println("[WiFi] Starting AP+STA mode...");
+  WiFi.persistent(false);       // avoid SDK flash-config writes (and heap churn) on every WiFi.begin()
+  WiFi.setAutoReconnect(false); // we drive retries ourselves; SDK auto-reconnect fights them
   WiFi.mode(WIFI_AP_STA);
 
   // Log when a device connects/disconnects from our AP
