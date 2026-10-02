@@ -273,8 +273,15 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
     return false;
   }
   if (wifiConnect.active) {
-    Serial.println("[WiFi] startWiFiConnect: already connecting, aborting");
-    return false;
+    if (!saveToEeprom) {
+      Serial.println("[WiFi] startWiFiConnect: already connecting, aborting");
+      return false;
+    }
+    // User-initiated change of network: supersede the running (auto) attempt
+    // so the new SSID is saved and used instead of the old one.
+    Serial.println("[WiFi] User request supersedes active connection attempt");
+    wifiConnect.active = false;
+    wifiConnect.connecting = false;
   }
   if (ESP.getFreeHeap() < 8000) {
     Serial.printf("[WiFi] Heap critically low (%u) -- restarting to avoid crash\n", ESP.getFreeHeap());
