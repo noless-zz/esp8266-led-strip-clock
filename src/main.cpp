@@ -139,9 +139,24 @@ void loop() {
   // Also handles retries after timeout (updateWiFiConnect triggers a rescan on timeout).
   if (!wifiConnected && !wifiConnect.active && savedSsid.length() > 0) {
     int scanState = WiFi.scanComplete();
+    static unsigned long scanWaitStart = 0;
+    static unsigned long lastWaitLog = 0;
     if (scanState == WIFI_SCAN_RUNNING) {
+      if (scanWaitStart == 0) scanWaitStart = millis();
       if (bootStage < BOOT_STAGE_SCANNING) bootStage = BOOT_STAGE_SCANNING;
+      if (millis() - lastWaitLog > 5000) {
+        lastWaitLog = millis();
+        Serial.printf("[WiFi] Waiting for scan before connecting to \"%s\" (%lus)\n",
+                      savedSsid.c_str(), (millis() - scanWaitStart) / 1000);
+      }
+      if (millis() - scanWaitStart > 10000) {
+        Serial.println("[WiFi] Scan stuck >10s, connecting without channel hint");
+        scanWaitStart = 0;
+        bootStage = BOOT_STAGE_STA_CONN;
+        startWiFiConnect(savedSsid, savedPass);
+      }
     } else if (scanState >= 0) {
+      scanWaitStart = 0;
       Serial.printf("[WiFi] Scan done (%d networks). Connecting to: %s\n",
                     scanState, savedSsid.c_str());
       getWifiScanJson();  // populate scan cache
@@ -149,6 +164,7 @@ void loop() {
       bootStage = BOOT_STAGE_STA_CONN;
       startWiFiConnect(savedSsid, savedPass);  // AP channel switch now done inside startWiFiConnect
     } else if (scanState == WIFI_SCAN_FAILED) {
+      scanWaitStart = 0;
       Serial.println("[WiFi] Scan failed, connecting without channel hint");
       bootStage = BOOT_STAGE_STA_CONN;
       startWiFiConnect(savedSsid, savedPass);
