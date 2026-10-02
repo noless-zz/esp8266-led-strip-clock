@@ -349,7 +349,36 @@ bool startWiFiConnect(const String& ssid, const String& pass, bool saveToEeprom)
   return true;
 }
 
+static bool pendingConnect = false;
+static String pendingSsid;
+static String pendingPass;
+
+// Called from the async web handler (sys context, where yield()/delay() are
+// forbidden): only record the request; loop() performs the actual connect.
+bool queueWiFiConnect(const String& ssid, const String& pass) {
+  if (ssid.length() == 0) return false;
+  pendingSsid = ssid;
+  pendingPass = pass;
+  pendingConnect = true;
+  wifiConnect.active = true;
+  wifiConnect.connecting = true;
+  wifiConnect.attemptedSsid = ssid;
+  wifiConnect.startedAt = millis();
+  return true;
+}
+
+void processPendingWiFiConnect() {
+  if (!pendingConnect) return;
+  pendingConnect = false;
+  String ssid = pendingSsid;
+  String pass = pendingPass;
+  pendingSsid = "";
+  pendingPass = "";
+  startWiFiConnect(ssid, pass, true);
+}
+
 void updateWiFiConnect() {
+  if (pendingConnect) return;
   if (!wifiConnect.active) return;
 
   wl_status_t status = WiFi.status();
